@@ -1,3 +1,5 @@
+import { getRuntimeI18nLocale } from '@/i18n/runtime'
+
 export interface CommandsCatalogSection {
   name: string
   pairs: [string, string][]
@@ -507,7 +509,55 @@ export function desktopSlashUnavailableMessage(command: string): string | null {
   return null
 }
 
+
+/**
+ * Русские описания команд слэша (локальная русификация). Ключ — каноническое
+ * имя команды. Применяются, когда активная локаль интерфейса — ru.
+ */
+const SLASH_DESCRIPTIONS_RU: Record<string, string> = {
+  '/new': 'Начать новый чат в десктопе',
+  '/branch': 'Ветвление последнего сообщения в новый чат',
+  '/yolo': 'Вкл/выкл YOLO — автоодобрение опасных команд',
+  '/wake': 'Управление голосовым пробуждением [on|off|status]',
+  '/handoff': 'Передать эту сессию в мессенджер',
+  '/profile': 'Переключить активный профиль Hermes',
+  '/skin': 'Сменить тему оформления или следующую по кругу',
+  '/title': 'Переименовать текущую сессию',
+  '/help': 'Показать команды десктопа',
+  '/browser': 'Управление CDP-подключением браузера [connect|disconnect|status] (только локальный шлюз)',
+  '/journey': 'Открыть граф памяти — навыки и воспоминания во времени',
+  '/model': 'Сменить модель для этой сессии',
+  '/resume': 'Вернуться к сохранённой сессии',
+  '/approvals': 'Показать или задать режим подтверждений [manual|smart|off]',
+  '/agents': 'Показать активные сессии и запущенные задачи',
+  '/background': 'Запустить запрос в фоне',
+  '/compress': 'Сжать контекст этого диалога',
+  '/debug': 'Создать отладочный отчёт',
+  '/goal': 'Управление постоянной целью этой сессии',
+  '/loop': 'Повторять запрос по расписанию в этой сессии',
+  '/personality': 'Сменить характер для этой сессии',
+  '/pet': 'Питомец: вкл/выкл или завести (/pet, /pet list, /pet boba)',
+  '/hatch': 'Создать нового питомца (открывает генератор питомцев)',
+  '/queue': 'Поставить запрос в очередь на следующий ход',
+  '/retry': 'Повторить последнее сообщение пользователя',
+  '/rollback': 'Показать или восстановить контрольные точки файлов',
+  '/save': 'Сохранить текущую переписку в JSON',
+  '/status': 'Показать статус текущей сессии',
+  '/steer': 'Скорректировать текущий запуск после следующего инструмента',
+  '/stop': 'Остановить фоновые процессы',
+  '/tools': 'Список или вкл/выкл инструментов агента',
+  '/undo': 'Удалить последний обмен (пользователь/ассистент)',
+  '/usage': 'Показать расход токенов за сессию',
+  '/version': 'Версия Hermes Agent'
+}
+
 export function desktopSlashDescription(command: string, fallback = ''): string {
+  if (getRuntimeI18nLocale() === 'ru') {
+    const ru = SLASH_DESCRIPTIONS_RU[canonicalDesktopSlashCommand(command)]
+    if (ru) {
+      return ru
+    }
+  }
   return SPEC_BY_NAME.get(canonicalDesktopSlashCommand(command))?.description || fallback
 }
 
@@ -526,17 +576,17 @@ export function desktopSkinSlashCompletions(
     {
       text: '/skin list',
       display: '/skin list',
-      meta: 'Show available desktop themes'
+      meta: getRuntimeI18nLocale() === 'ru' ? 'Показать доступные темы десктопа' : 'Show available desktop themes'
     },
     {
       text: '/skin next',
       display: '/skin next',
-      meta: 'Cycle to the next desktop theme'
+      meta: getRuntimeI18nLocale() === 'ru' ? 'Следующая тема десктопа' : 'Cycle to the next desktop theme'
     },
     ...themes.map(theme => ({
       text: `/skin ${theme.name}`,
       display: `/skin ${theme.name}`,
-      meta: `${theme.label}${theme.name === activeThemeName ? ' (current)' : ''} - ${theme.description}`
+      meta: `${theme.label}${theme.name === activeThemeName ? (getRuntimeI18nLocale() === 'ru' ? ' (текущая)' : ' (current)') : ''} - ${theme.description}`
     }))
   ]
 

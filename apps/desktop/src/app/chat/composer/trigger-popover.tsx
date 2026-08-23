@@ -5,6 +5,7 @@ import { referenceKind, referenceStyle } from '@/components/assistant-ui/referen
 import { Codicon } from '@/components/ui/codicon'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { useI18n } from '@/i18n'
+import { getRuntimeI18nLocale } from '@/i18n/runtime'
 import { cn } from '@/lib/utils'
 
 import { COMPLETION_DRAWER_BELOW_CLASS, COMPLETION_DRAWER_CLASS, CompletionDrawerEmpty } from './completion-drawer'
@@ -47,6 +48,23 @@ const ROW_CLASS = [
   'outline-hidden transition-colors hover:bg-(--ui-bg-tertiary)',
   'data-[highlighted]:bg-(--ui-bg-tertiary) data-[highlighted]:text-foreground'
 ].join(' ')
+
+const SLASH_GROUP_LABELS_RU: Record<string, string> = {
+  commands: 'Команды',
+  skills: 'Навыки',
+  sessions: 'Сессии',
+  session: 'Сессии',
+  options: 'Варианты',
+  themes: 'Темы'
+}
+
+function slashGroupLabel(group: string): string {
+  if (getRuntimeI18nLocale() !== 'ru') {
+    return group
+  }
+
+  return SLASH_GROUP_LABELS_RU[group.toLowerCase()] ?? group
+}
 
 const GROUP_HEADER_CLASS =
   'select-none px-2 pb-0.5 text-[0.625rem] font-semibold uppercase tracking-wider text-(--ui-text-tertiary)'
@@ -198,7 +216,7 @@ export function ComposerTriggerPopover({
 
           return (
             <Fragment key={item.id}>
-              {showHeader && <div className={cn(GROUP_HEADER_CLASS, isFirstHeader ? 'pt-0.5' : 'pt-2')}>{group}</div>}
+              {showHeader && <div className={cn(GROUP_HEADER_CLASS, isFirstHeader ? 'pt-0.5' : 'pt-2')}>{slashGroupLabel(group)}</div>}
               <button
                 className={ROW_CLASS}
                 data-highlighted={active ? '' : undefined}
