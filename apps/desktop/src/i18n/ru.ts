@@ -1,6 +1,26 @@
 import { defineLocale } from './define-locale'
+import { ruExtra1 } from './ru-extra-1'
+import { ruExtra2 } from './ru-extra-2'
+import { ruExtra3 } from './ru-extra-3'
+import { ruExtra4 } from './ru-extra-4'
+import { ruExtra5 } from './ru-extra-5'
+import { ruExtra6 } from './ru-extra-6'
+import { ruExtra7 } from './ru-extra-7'
+import { ruExtra8 } from './ru-extra-8'
+import { ruExtra9 } from './ru-extra-9'
 
-export const ru = defineLocale({
+function deepMerge<T>(base: T, override: T): T {
+  if (base && typeof base === 'object' && override && typeof override === 'object') {
+    const out: Record<string, unknown> = { ...(base as Record<string, unknown>) }
+    for (const [k, v] of Object.entries(override as Record<string, unknown>)) {
+      out[k] = k in (base as Record<string, unknown>) ? deepMerge((base as Record<string, unknown>)[k], v) : v
+    }
+    return out as T
+  }
+  return (override ?? base) as T
+}
+
+const ruBase = {
   common: {
     apply: 'Применить',
     back: 'Назад',
@@ -2386,6 +2406,8 @@ export const ru = defineLocale({
         description: 'Показывает мобильную боковую панель.',
         toggle: open => `${open ? 'Показать' : 'Скрыть'} боковую панель`
       }
-    },
+    },}
 
-})
+export const ru = defineLocale(
+  deepMerge(ruBase, [ruExtra1, ruExtra2, ruExtra3, ruExtra4, ruExtra5, ruExtra6, ruExtra7, ruExtra8, ruExtra9].reduce((acc, part) => deepMerge(acc, part), {} as typeof ruExtra1)) as Parameters<typeof defineLocale>[0]
+)
