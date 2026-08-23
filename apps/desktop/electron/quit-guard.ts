@@ -75,18 +75,18 @@ export function quitPromptFor(work: ActiveWork, quittingForHandoff: boolean): nu
   const lines = listed.map(title => `• ${title}`)
 
   if (remaining > 0) {
-    lines.push(remaining === 1 ? '• 1 more' : `• ${remaining} more`)
+    lines.push(remaining === 1 ? '• ещё 1' : `• ещё ${remaining}`)
   }
 
   return {
     detail: [
       lines.join('\n'),
       lines.length > 0 ? '' : null,
-      'Quitting stops the agent mid-turn. Any work it has not finished writing is lost.'
+      'Выход остановит агента посреди задачи. Всё, что он не успел записать, будет потеряно.'
     ]
       .filter(line => line !== null)
       .join('\n')
       .trim(),
-    message: work.count === 1 ? 'Hermes is still working on 1 chat.' : `Hermes is still working on ${work.count} chats.`
+    message: work.count === 1 ? 'Hermes всё ещё работает над 1 чатом.' : `Hermes всё ещё работает над ${work.count} чатами.`
   }
 }

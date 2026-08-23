@@ -11855,7 +11855,7 @@ function BotsPane() {
         children: [
           jsx('span', {
             className: 'text-[0.6875rem] font-semibold uppercase tracking-wider text-(--ui-text-quaternary)',
-            children: 'Bots'
+            children: 'Боты'
           }),
           jsxs('div', {
             className: 'flex items-center gap-0.5',
@@ -12164,8 +12164,8 @@ function BotsPane() {
 
 export default {
   id: ID,
-  name: 'Bots',
-  description: 'Bot Mode — a one-chat-per-agent roster with avatars, routines, group chats, and bot-to-bot messaging. Ships with the app; disable here if unwanted.',
+  name: 'Боты',
+  description: 'Режим ботов — список чатов по одному на агент: аватары, рутины, групповые чаты и общение ботов между собой. Встроен в приложение; отключите здесь, если он не нужен.',
   register(ctx) {
     pluginCtx = ctx
     groupChatSyncDisposed = false
@@ -12358,7 +12358,7 @@ export default {
     ctx.register({
       id: 'pane',
       area: 'panes',
-      title: 'Bots',
+      title: 'Боты',
       // dock: explicit adoption gesture — CENTER-STACK into the sessions zone
       // so the sidebar grows a SESSIONS | BOTS tab strip instead of splitting
       // two cramped panes down the column. Center is safe now: insertAtGroup

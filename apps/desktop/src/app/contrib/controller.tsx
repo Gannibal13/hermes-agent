@@ -155,7 +155,7 @@ registry.registerMany([
   {
     id: 'sessions',
     area: 'panes',
-    title: 'sessions',
+    title: 'Сессии',
     // Collapsible: leaves the grid on narrow viewports (edge overlay instead).
     // dock: where a RE-ADOPTED pane lands (healed from a stale dismissal) —
     // its default-ish spot beside main, not a random same-placement stack.
@@ -190,7 +190,7 @@ registry.registerMany([
   {
     id: 'terminal',
     area: 'panes',
-    title: 'terminal',
+    title: 'Терминал',
     // revealOnPreset: choosing a layout that places the terminal (e.g.
     // "Terminal deck") turns takeover on so the zone actually shows, instead of
     // staying collapsed behind the ⌃` toggle. height sizes the fixed track (a
@@ -212,7 +212,7 @@ registry.registerMany([
   {
     id: 'files',
     area: 'panes',
-    title: 'files',
+    title: 'Файлы',
     // dock: re-adoption target after a stale dismissal (see sessions).
     data: {
       placement: 'right',
@@ -228,7 +228,7 @@ registry.registerMany([
   {
     id: 'review',
     area: 'panes',
-    title: 'review',
+    title: 'Ревью',
     // The second right sidebar: hidden until ⌘G ($reviewOpen) — bound below
     // like the other chrome toggles; its zone collapses while hidden.
     data: {
@@ -432,10 +432,10 @@ const QUAD_TREE = split(
 )
 
 registry.registerMany([
-  { id: 'default', area: 'layouts', title: 'Default', order: 0, data: DEFAULT_TREE },
-  { id: 'focus', area: 'layouts', title: 'Focus', order: 10, data: FOCUS_TREE },
-  { id: 'terminal-deck', area: 'layouts', title: 'Terminal deck', order: 20, data: TERMINAL_TREE },
-  { id: 'quad', area: 'layouts', title: 'Quad', order: 30, data: QUAD_TREE }
+  { id: 'default', area: 'layouts', title: 'Стандартная', order: 0, data: DEFAULT_TREE },
+  { id: 'focus', area: 'layouts', title: 'Фокус', order: 10, data: FOCUS_TREE },
+  { id: 'terminal-deck', area: 'layouts', title: 'Терминалы', order: 20, data: TERMINAL_TREE },
+  { id: 'quad', area: 'layouts', title: 'Сетка', order: 30, data: QUAD_TREE }
 ])
 
 declareDefaultTree(DEFAULT_TREE)
@@ -641,7 +641,7 @@ const syncLogsPane = (open: boolean) => {
     unregisterLogsPane ??= registry.register({
       id: 'logs',
       area: 'panes',
-      title: 'logs',
+      title: 'Логи',
       // Same tool-panel sizing rule as the terminal above — no minHeight, so
       // the sash floors it at COLLAPSED_ZONE_PX and folds the zone to its rail
       // rather than leaving a sliver. dock: its OWN zone beside the terminal —

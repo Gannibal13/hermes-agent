@@ -2070,16 +2070,16 @@ async function waitForUpdateToFinish() {
       rememberLog(`[updates] detached update finished with manual action (branch ${result.branch}): ${result.message}`)
       dialog.showMessageBox({
         type: 'warning',
-        title: 'Hermes update',
-        message: 'The update finished, but needs one more step',
+        title: 'Обновление Hermes',
+        message: 'Обновление завершилось, но нужен ещё один шаг',
         detail: result.message
       })
     } else if (result && result.ok) {
-      rememberLog(`[updates] detached update finished OK (branch ${result.branch})`)
+      rememberLog(`[updates] detached update finished OK (branch ${result.branch}): ${result.message}`)
     } else if (result) {
       rememberLog(`[updates] detached update FAILED (exit ${result.exitCode}): ${result.message}`)
       dialog.showErrorBox(
-        'Hermes update did not finish',
+        'Обновление Hermes не завершилось',
         `${result.message}\n\nDetails: ${path.join(HERMES_HOME, 'logs', 'desktop-update-handoff.log')}`
       )
     }
@@ -15227,7 +15227,7 @@ function heldQuitForActiveWork(event: Electron.Event): boolean {
 
   void dialog
     .showMessageBox(parent, {
-      buttons: ['Keep Running', 'Quit Anyway'],
+      buttons: ['Оставить запущенным', 'Всё равно выйти'],
       cancelId: 0,
       defaultId: 0,
       detail: prompt.detail,
