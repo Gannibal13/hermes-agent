@@ -653,7 +653,7 @@ function groupChatSyncSnapshot(all = $groupChats.get(), deleted = {}) {
       ...(entry?.id ? { id: String(entry.id).slice(0, 160) } : {}),
       from: {
         kind: entry?.from?.kind === 'member' ? 'member' : 'user',
-        name: String(entry?.from?.name || (entry?.from?.kind === 'member' ? 'Bot' : 'You')).slice(0, 128),
+        name: String(entry?.from?.name || (entry?.from?.kind === 'member' ? 'Бот' : 'You')).slice(0, 128),
         ...(entry?.from?.source ? { source: String(entry.from.source).slice(0, 128) } : {})
       },
       text: String(entry?.text || '').slice(0, GROUP_CHAT_SYNC_TEXT_CHARS),
@@ -3821,7 +3821,7 @@ function McpSetupButton({ profile, entry, onDone, ensureProfile }) {
           className: 'flex gap-1',
           children: [
             jsx(Button, { size: 'xs', variant: 'secondary', onClick: () => void submitKeys(), children: 'Save & test' }),
-            jsx(Button, { size: 'xs', variant: 'ghost', onClick: () => setPhase('idle'), children: 'Cancel' })
+            jsx(Button, { size: 'xs', variant: 'ghost', onClick: () => setPhase('idle'), children: 'Отмена' })
           ]
         })
       ]
@@ -4144,7 +4144,7 @@ function AvatarPicker({ shape, color, image, onShape, onColor, onImage, generate
       // Tab pills: Bot | Generate | Upload | Pet
       jsxs('div', {
         className: 'flex items-center gap-1',
-        children: [tabButton('bot', 'Bot'), tabButton('generate', 'Generate'), tabButton('upload', 'Upload'), tabButton('pet', 'Pet')]
+        children: [tabButton('bot', 'Бот'), tabButton('generate', 'Сгенерировать'), tabButton('upload', 'Загрузить'), tabButton('pet', 'Питомец')]
       }),
 
       image && tab !== 'generate'
@@ -4190,7 +4190,7 @@ function AvatarPicker({ shape, color, image, onShape, onColor, onImage, generate
                           },
                           children: k
                             ? jsx(BotFace, { shape: blobShapeString(seedPart, k), color, size: 32, name: pickerName })
-                            : jsx('span', { className: 'text-[0.6rem] text-(--ui-text-tertiary)', children: 'Auto' })
+                            : jsx('span', { className: 'text-[0.6rem] text-(--ui-text-tertiary)', children: 'Авто' })
                         },
                         k || 'auto'
                       )
@@ -4207,7 +4207,7 @@ function AvatarPicker({ shape, color, image, onShape, onColor, onImage, generate
                           onImage(null)
                           onShape(blobShapeString(Math.random().toString(36).slice(2, 10), kind))
                         },
-                        children: [jsx(Codicon, { name: 'refresh', className: 'mr-1 text-[0.8rem]' }), 'Randomize']
+                        children: [jsx(Codicon, { name: 'refresh', className: 'mr-1 text-[0.8rem]' }), 'Случайно']
                       }),
                       jsxs(Button, {
                         type: 'button',
@@ -4219,14 +4219,14 @@ function AvatarPicker({ shape, color, image, onShape, onColor, onImage, generate
                         onClick: () => onShape(blobShapeString(locked ? '' : pickerName, kind)),
                         children: [
                           jsx(Codicon, { name: locked ? 'unlock' : 'lock', className: 'mr-1 text-[0.8rem]' }),
-                          locked ? 'Unlock' : 'Lock face'
+                          locked ? 'Открепить' : 'Закрепить лицо'
                         ]
                       })
                     ]
                   }),
                   jsx('div', {
                     className: 'text-center text-[0.65rem] text-(--ui-text-quaternary)',
-                    children: locked ? 'Face locked — renaming won\u2019t change it.' : 'Face follows the name.'
+                    children: locked ? 'Face locked — renaming won\u2019t change it.' : 'Лицо зависит от имени.'
                   }),
                   jsx(Button, {
                     type: 'button',
@@ -4234,7 +4234,7 @@ function AvatarPicker({ shape, color, image, onShape, onColor, onImage, generate
                     size: 'sm',
                     className: 'text-(--ui-text-tertiary)',
                     onClick: () => onShape(defaultShapeFor(pickerName)),
-                    children: 'Classic shapes'
+                    children: 'Классические формы'
                   })
                 ]
               })
@@ -4318,7 +4318,7 @@ function AvatarPicker({ shape, color, image, onShape, onColor, onImage, generate
                     genBusy
                       ? jsx(GlyphSpinner, { spinner: 'breathe', className: 'mr-1 text-[0.8rem]' })
                       : jsx(Codicon, { name: 'sparkle', className: 'mr-1 text-[0.8rem]' }),
-                    genBusy ? 'Generating…' : 'Generate'
+                    genBusy ? 'Generating…' : 'Сгенерировать'
                   ]
                 }),
                 describe.trim()
@@ -8950,7 +8950,7 @@ function AdvancedProfileConfig({ bot, state, setState }) {
           children: [
             jsx(Input, {
               className: 'h-7 text-xs',
-              placeholder: 'Filter skills…',
+              placeholder: 'Фильтр навыков…',
               value: skillFilter,
               onChange: event => setSkillFilter(event.target.value)
             }),
@@ -9030,7 +9030,7 @@ function AdvancedProfileConfig({ bot, state, setState }) {
             : mcpList.length === 0
               ? jsx('div', {
                   className: 'px-1 py-2 text-center text-xs text-(--ui-text-tertiary)',
-                  children: 'No MCP servers configured or in the catalog.'
+                  children: 'MCP-серверы не настроены и отсутствуют в каталоге.'
                 })
               : jsx(ScrollArea, {
                   className: 'hermes-scroll-cap',
@@ -9579,7 +9579,7 @@ function EditProfileDialog({ bot, open, onClose }) {
               generateSeed: { name: bot.name, title, description }
             }),
             labeled(
-              'Title',
+              'Название',
               jsx(Input, {
                 placeholder: displayName(bot, null),
                 value: title,
@@ -9587,7 +9587,7 @@ function EditProfileDialog({ bot, open, onClose }) {
               })
             ),
             labeled(
-              'Description',
+              'Описание',
               jsx(Textarea, {
                 className: 'min-h-16',
                 placeholder: 'What should this agent help with?',
@@ -9615,7 +9615,7 @@ function EditProfileDialog({ bot, open, onClose }) {
         }),
         jsxs(DialogFooter, {
           children: [
-            jsx(Button, { variant: 'ghost', disabled: busy, onClick: onClose, children: 'Cancel' }),
+            jsx(Button, { variant: 'ghost', disabled: busy, onClick: onClose, children: 'Отмена' }),
             jsx(Button, { disabled: busy, onClick: submit, children: busy ? 'Saving…' : 'Save' })
           ]
         })
@@ -9995,9 +9995,9 @@ function CreateAgentDialog({ open, onClose, roster }) {
       children: [
         jsxs(DialogHeader, {
           children: [
-            jsx(DialogTitle, { children: 'New Bot' }),
+            jsx(DialogTitle, { children: 'Новый бот' }),
             jsx(DialogDescription, {
-              children: 'A named teammate with its own memory, skills, and chat. It can message your other agents.'
+              children: 'Именованный напарник со своей памятью, навыками и чатом. Может писать вашим другим агентам.'
             })
           ]
         }),
@@ -10018,7 +10018,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
               generateSeed: { name: slug || 'agent', title, description }
             }),
             labeled(
-              'Name',
+              'Имя',
               jsx(Input, {
                 autoFocus: true,
                 placeholder: 'inbox-triage',
@@ -10083,7 +10083,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
                 })
               : null,
             labeled(
-              'Title',
+              'Название',
               jsx(Input, {
                 placeholder: 'Inbox Triage',
                 value: title,
@@ -10091,10 +10091,10 @@ function CreateAgentDialog({ open, onClose, roster }) {
               })
             ),
             labeled(
-              'Description',
+              'Описание',
               jsx(Textarea, {
                 className: 'min-h-16',
-                placeholder: 'What should this Bot help with?',
+                placeholder: 'С чем должен помогать этот бот?',
                 value: description,
                 onChange: event => setDescription(event.target.value)
               })
@@ -10113,7 +10113,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
               },
               children: [
                 jsx(Codicon, { name: advanced ? 'chevron-down' : 'chevron-right', className: 'text-[0.8rem]' }),
-                'Advanced'
+                'Дополнительно'
               ]
             }),
             advanced
@@ -10133,13 +10133,13 @@ function CreateAgentDialog({ open, onClose, roster }) {
                       // reads already route to the target).
                       children: (SkillsView && (!remoteTarget || skillsViewRoutesConnections)
                         ? [
-                            ['general', 'General'],
-                            ['capabilities', 'Capabilities']
+                            ['general', 'Общее'],
+                            ['capabilities', 'Возможности']
                           ]
                         : [
-                            ['general', 'General'],
+                            ['general', 'Общее'],
                             ['skills', 'Skills'],
-                            ['toolsets', 'Tools'],
+                            ['toolsets', 'Инструменты'],
                             ['mcp', 'MCP']
                           ]
                       ).map(([id, label]) =>
@@ -10162,7 +10162,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
                                 // the MCP setup buttons use).
                                 void ensureAgentCreated()
                                   .then(created => created && setCreatedForCaps(created))
-                                  .catch(err => host.notifyError(err, 'Could not create the profile yet'))
+                                  .catch(err => host.notifyError(err, 'Не удалось создать профиль'))
                               } else if (id !== 'general') {
                                 ensureCaps()
                               }
@@ -10178,7 +10178,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
                           className: 'grid gap-3.5',
                           children: [
                             labeled(
-                              remoteTarget ? `Clone from profile (on ${targetLabel})` : 'Clone from profile',
+                              remoteTarget ? `Clone from profile (on ${targetLabel})` : 'Клонировать из профиля',
                               jsxs(Select, {
                                 disabled: remoteTarget,
                                 value: remoteTarget ? 'default' : cloneFrom,
@@ -10196,7 +10196,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
                                     children: [
                                       jsx(SelectItem, {
                                         value: '__none__',
-                                        children: 'Fresh profile (bundled skills)'
+                                        children: 'Свежий профиль (встроенные навыки)'
                                       }),
                                       ...roster.map(b => jsx(SelectItem, { value: b.name, children: b.name }, b.name))
                                     ]
@@ -10217,7 +10217,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
                               placeholderModel: 'inherited from launch profile'
                             }),
                             labeled(
-                              'SOUL.md (optional — replaces the generated persona)',
+                              'SOUL.md (необязательно — заменяет сгенерированную личность)',
                               jsx(Textarea, {
                                 className: 'min-h-24 font-mono text-xs leading-5',
                                 placeholder:
@@ -10233,7 +10233,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
                                   checked: shareAuth,
                                   onCheckedChange: value => setShareAuth(Boolean(value))
                                 }),
-                                'Share keys & accounts with the main profile'
+                                'Общие ключи и аккаунты с основным профилем'
                               ]
                             }),
                             jsx('div', {
@@ -10248,7 +10248,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
                                   checked: noSkills,
                                   onCheckedChange: value => setNoSkills(Boolean(value))
                                 }),
-                                'Create empty (skip bundled skills)'
+                                'Создать пустым (без встроенных навыков)'
                               ]
                             })
                           ]
@@ -10258,8 +10258,8 @@ function CreateAgentDialog({ open, onClose, roster }) {
                           ? jsx('div', {
                               className: 'px-2 py-3 text-center text-xs text-(--ui-text-tertiary)',
                               children: taken
-                                ? 'That name is taken — pick another before configuring capabilities.'
-                                : 'Name the bot first — a draft profile is created when you open this tab (discarded if you cancel).'
+                                ? 'Имя занято — выберите другое перед настройкой возможностей.'
+                                : 'Сначала задайте имя бота — черновик профиля создаётся при открытии этой вкладки (и будет удалён при отмене).'
                             })
                           : !createdForCaps
                             ? jsx('div', {
@@ -10288,7 +10288,7 @@ function CreateAgentDialog({ open, onClose, roster }) {
                         ? jsx('div', {
                             className: 'px-2 py-3 text-center text-xs text-(--ui-text-tertiary)',
                             children:
-                              'Capability catalog needs a newer gateway (restart it after updating Hermes).'
+                              'Каталогу возможностей нужен более новый шлюз (перезапустите его после обновления Hermes).'
                           })
                         : !caps
                           ? jsx('div', {
@@ -10302,14 +10302,14 @@ function CreateAgentDialog({ open, onClose, roster }) {
                             ? noSkills
                               ? jsx('div', {
                                   className: 'px-2 py-3 text-center text-xs text-(--ui-text-tertiary)',
-                                  children: '“Create empty” is checked — no bundled skills will be installed.'
+                                  children: 'Включено «Создать пустым» — встроенные навыки устанавливаться не будут.'
                                 })
                               : jsxs('div', {
                                   className: 'grid gap-1.5',
                                   children: [
                                     jsx(Input, {
                                       className: 'h-7 text-xs',
-                                      placeholder: 'Filter skills…',
+                                      placeholder: 'Фильтр навыков…',
                                       value: capFilter,
                                       onChange: event => setCapFilter(event.target.value)
                                     }),
@@ -10356,14 +10356,14 @@ function CreateAgentDialog({ open, onClose, roster }) {
                                     }),
                                     jsx('div', {
                                       className: 'text-[0.65rem] leading-4 text-(--ui-text-quaternary)',
-                                      children: 'Leaving all (or none) checked keeps the default toolset behavior.'
+                                      children: 'Если отметить все (или ни одного) — останется поведение наборов по умолчанию.'
                                     })
                                   ]
                                 })
                               : caps.mcp.length === 0
                                 ? jsx('div', {
                                     className: 'px-2 py-3 text-center text-xs text-(--ui-text-tertiary)',
-                                    children: 'No MCP servers configured or in the catalog.'
+                                    children: 'MCP-серверы не настроены и отсутствуют в каталоге.'
                                   })
                                 : jsxs('div', {
                                     className: 'grid gap-1.5',
@@ -10467,12 +10467,12 @@ function CreateAgentDialog({ open, onClose, roster }) {
                 reset()
                 onClose()
               },
-              children: 'Cancel'
+              children: 'Отмена'
             }),
             jsx(Button, {
               disabled: busy || !valid || taken,
               onClick: submit,
-              children: busy ? 'Creating…' : 'Create Bot'
+              children: busy ? 'Создание…' : 'Создать бота'
             })
           ]
         })
@@ -10497,7 +10497,7 @@ function routineBot(job) {
 }
 
 function routineTitle(job) {
-  return (job?.name || '').replace(BOT_TAG_RE, '') || 'Untitled cronjob'
+  return (job?.name || '').replace(BOT_TAG_RE, '') || 'Безымянная рутина'
 }
 
 function isLegacyDelegatedRoutine(job) {
@@ -11185,7 +11185,7 @@ function CreateRoutineDialog({ bot, open, onClose }) {
           className: 'grid gap-3.5',
           children: [
             labeled(
-              'Name',
+              'Имя',
               jsx(Input, {
                 autoFocus: true,
                 placeholder: 'Name this cronjob',
@@ -11239,7 +11239,7 @@ function CreateRoutineDialog({ bot, open, onClose }) {
                 reset()
                 onClose()
               },
-              children: 'Cancel'
+              children: 'Отмена'
             }),
             jsx(Button, {
               disabled: busy || !name.trim() || !instruction.trim() || !schedule.trim(),
@@ -11690,7 +11690,7 @@ function GroupImageControls({ image, onImage, seedName, seedMembers }) {
           ? jsx('img', { src: image, alt: '', className: 'size-full object-cover' })
           : jsx(Codicon, { name: 'organization', className: 'text-(--ui-text-tertiary)' })
       }),
-      jsx(Button, { type: 'button', variant: 'secondary', size: 'sm', onClick: upload, children: 'Upload' }),
+      jsx(Button, { type: 'button', variant: 'secondary', size: 'sm', onClick: upload, children: 'Загрузить' }),
       imagen
         ? jsx(Button, {
             type: 'button',
@@ -11698,7 +11698,7 @@ function GroupImageControls({ image, onImage, seedName, seedMembers }) {
             size: 'sm',
             disabled: busy,
             onClick: generate,
-            children: busy ? 'Generating…' : 'Generate'
+            children: busy ? 'Generating…' : 'Сгенерировать'
           })
         : null,
       image
@@ -11782,7 +11782,7 @@ function GroupChatSettingsDialog({ group, members, open, onClose, onRenamed }) {
         }),
         jsxs(DialogFooter, {
           children: [
-            jsx(Button, { variant: 'secondary', onClick: onClose, children: 'Cancel' }),
+            jsx(Button, { variant: 'secondary', onClick: onClose, children: 'Отмена' }),
             jsx(Button, { disabled: !name.trim(), onClick: () => void save(), children: 'Save' })
           ]
         })
@@ -11996,7 +11996,7 @@ function CreateGroupChatDialog({ open, roster, onClose, onCreated }) {
         }),
         jsxs(DialogFooter, {
           children: [
-            jsx(Button, { variant: 'secondary', onClick: onClose, children: 'Cancel' }),
+            jsx(Button, { variant: 'secondary', onClick: onClose, children: 'Отмена' }),
             jsx(Button, {
               disabled: !canCreate,
               title: selected.length < 2 ? 'Pick at least 2 bots' : undefined,
@@ -14395,7 +14395,7 @@ function BotsPane() {
         children: [
           jsx('span', {
             className: 'text-[0.6875rem] font-semibold uppercase tracking-wider text-(--ui-text-quaternary)',
-            children: 'Bots'
+            children: 'Боты'
           }),
           jsxs('div', {
             className: 'flex items-center gap-0.5',
@@ -14430,12 +14430,12 @@ function BotsPane() {
                     children: [
                       jsxs(DropdownMenuItem, {
                         onSelect: () => setCreateOpen(true),
-                        children: [jsx(Codicon, { name: 'hubot', className: 'mr-1.5' }), 'New Bot']
+                        children: [jsx(Codicon, { name: 'hubot', className: 'mr-1.5' }), 'Новый бот']
                       }),
                       jsxs(DropdownMenuItem, {
                         disabled: activeSourceRoster.length < 2,
                         onSelect: () => setGroupCreateOpen(true),
-                        children: [jsx(Codicon, { name: 'organization', className: 'mr-1.5' }), 'New Group Chat']
+                        children: [jsx(Codicon, { name: 'organization', className: 'mr-1.5' }), 'Новый групповой чат']
                       })
                     ]
                   })
@@ -14815,8 +14815,8 @@ function BotsPane() {
 
 export default {
   id: ID,
-  name: 'Bots',
-  description: 'Bot Mode — a one-chat-per-agent roster with avatars, routines, group chats, and bot-to-bot messaging. Ships with the app; disable here if unwanted.',
+  name: 'Боты',
+  description: 'Режим ботов — список чатов по одному на агент: аватары, рутины, групповые чаты и общение ботов между собой. Встроен в приложение; отключите здесь, если он не нужен.',
   register(ctx) {
     pluginCtx = ctx
     groupChatSyncDisposed = false
@@ -15086,7 +15086,7 @@ export default {
     ctx.register({
       id: 'pane',
       area: 'panes',
-      title: 'Bots',
+      title: 'Боты',
       // dock: explicit adoption gesture — CENTER-STACK into the sessions zone
       // so the sidebar grows a SESSIONS | BOTS tab strip instead of splitting
       // two cramped panes down the column. Center is safe now: insertAtGroup
