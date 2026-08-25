@@ -1193,6 +1193,70 @@ _EMPTY_TOOL_RESPONSE_NUDGE = (
     "results above and continue with the task."
 )
 
+# Re-prompt used by the bounded turn-level auto-continue recovery
+# (``agent.turn_auto_continue``): when a turn ends with NO usable model
+# output at all — empty content after in-loop retries AND the fallback
+# chain, or every API retry exhausted before any response — instead of
+# ending with the "⚠️ No reply … Try `continue`" explainer and waiting
+# for the user to type it, re-drive the SAME turn up to N times.
+# Flagged _empty_recovery_synthetic so the existing scaffolding rules
+# apply: persistence skips it, and an UNANSWERED tail pair is stripped
+# by the finalization pop exactly like the other empty-recovery nudges.
+_AUTO_CONTINUE_NUDGE = (
+    "[System: The previous attempt produced no response because of a "
+    "transient model/provider error. Continue the original task from "
+    "where it stopped and deliver your answer.]"
+)
+
+
+def _maybe_auto_continue_turn(agent, messages, reason_label: str) -> bool:
+    """Append turn-auto-continue scaffolding and report whether to retry.
+
+    Bounded turn-level recovery for turns that produced no usable model
+    output (see ``_AUTO_CONTINUE_NUDGE``).  Returns True when the caller
+    should ``continue`` the main loop to re-run the turn; False when the
+    budget is disabled/exhausted and the caller must fall through to the
+    normal abnormal-exit terminal.  Mirrors the post-tool empty-response
+    nudge shape: when the last transcript row cannot be followed by a
+    bare user message (previous user row / tool result), an explicit
+    "(empty)" assistant half is inserted first so the role sequence
+    stays valid on every provider.
+    """
+    _max = getattr(agent, "_auto_continue_max", 0) or 0
+    if _max <= 0 or getattr(agent, "_auto_continue_used", 0) >= _max:
+        return False
+    agent._auto_continue_used = getattr(agent, "_auto_continue_used", 0) + 1
+    logger.warning(
+        "Turn ended with no usable response (%s) — auto-continuing "
+        "(%d/%d, model=%s provider=%s)",
+        reason_label,
+        agent._auto_continue_used,
+        _max,
+        agent.model,
+        agent.provider,
+    )
+    agent._emit_status(
+        "↻ Model returned no usable response after retries/fallback — "
+        f"auto-continuing the turn ({agent._auto_continue_used}/{_max})"
+    )
+    _last = messages[-1] if messages else None
+    _last_role = _last.get("role") if isinstance(_last, dict) else None
+    if _last_role != "assistant":
+        # user → user and tool → user are rejected by most APIs; bridge
+        # with an explicit empty assistant half (post-tool nudge shape).
+        messages.append({
+            "role": "assistant",
+            "content": "(empty)",
+            "_empty_recovery_synthetic": True,
+        })
+    messages.append({
+        "role": "user",
+        "content": _AUTO_CONTINUE_NUDGE,
+        "_empty_recovery_synthetic": True,
+    })
+    agent._session_messages = messages
+    return True
+
 
 # Shared recovery hint appended to every content-policy refusal message. Both
 # the HTTP-200 refusal path (``finish_reason=content_filter``) and the
