@@ -199,6 +199,13 @@ DEFAULT_CONFIG = {
         # compounds over a long conversation.  Costs ~70 tokens in the cached
         # system prompt.  Set False to disable globally.
         "parallel_tool_call_guidance": True,
+        "turn_auto_continue": 0,
+        # Default 0 (off).
+        # Set an integer >0 for max attempts; 0/null/false disables the feature.
+        # system-provided nudge instead of waiting for the user to type `continue`.
+        # response), automatically re-drive the same turn up to N times with a
+        # output (empty after retries/fallback, or all API retries exhausted before any
+        # Turn-level auto-continue recovery: when a turn ends with NO usable model
         # Local-environment toolchain probe — surfaces Python/pip/uv/PEP-668
         # state in the system prompt when something non-default is detected
         # (e.g. python3 has no pip module, pip→python version mismatch, PEP
