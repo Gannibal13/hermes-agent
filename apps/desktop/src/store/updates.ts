@@ -948,12 +948,17 @@ function ingestProgress(payload: DesktopUpdateProgress): void {
 }
 
 let pollerStarted = false
-let backgroundTimer: ReturnType<typeof setInterval> | null = null
-let lastFocusAt = 0
-let connectionUnsub: (() => void) | null = null
-let lastConnectionMode: string | undefined
 
-/** Wire up background polling + progress streaming. Idempotent. */
+/**
+ * Wire up apply-progress streaming. Idempotent.
+ *
+ * Manual-only updates: the app never checks for updates on its own — no
+ * startup check, no focus re-check, no background interval. Checks run only
+ * when the user opens an update surface (Settings → Updates overlay, About
+ * panel, command palette), each of which calls checkUpdates() itself.
+ * The progress subscription stays: without it a user-initiated apply would
+ * stream stages nobody renders.
+ */
 export function startUpdatePoller(): void {
   if (pollerStarted || typeof window === 'undefined') {
     return
@@ -966,58 +971,10 @@ export function startUpdatePoller(): void {
   }
 
   pollerStarted = true
-  void checkUpdates()
-  void checkBackendUpdates()
   void refreshDesktopVersion()
   bridge.onProgress(ingestProgress)
-
-  // The poller starts at mount, before the gateway connects — so the first
-  // backend check above sees mode≠remote and no-ops. Re-check once the
-  // connection resolves to remote.
-  connectionUnsub = $connection.subscribe(conn => {
-    if (conn?.mode === lastConnectionMode) {
-      return
-    }
-
-    lastConnectionMode = conn?.mode
-
-    if (conn?.mode === 'remote') {
-      void checkBackendUpdates()
-    }
-  })
-
-  window.addEventListener('focus', onFocus)
-  backgroundTimer = setInterval(
-    () => {
-      void checkUpdates()
-      void checkBackendUpdates()
-    },
-    30 * 60 * 1000
-  )
 }
 
 export function stopUpdatePoller(): void {
-  if (backgroundTimer !== null) {
-    clearInterval(backgroundTimer)
-    backgroundTimer = null
-  }
-
-  connectionUnsub?.()
-  connectionUnsub = null
-  lastConnectionMode = undefined
-  window.removeEventListener('focus', onFocus)
   pollerStarted = false
-}
-
-function onFocus() {
-  const now = Date.now()
-
-  if (now - lastFocusAt < 5 * 60 * 1000) {
-    return
-  }
-
-  lastFocusAt = now
-  void checkUpdates()
-  void checkBackendUpdates()
-  void refreshDesktopVersion()
 }

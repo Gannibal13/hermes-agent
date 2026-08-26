@@ -1209,37 +1209,29 @@ describe('startUpdatePoller', () => {
     vi.useRealTimers()
   })
 
-  it('calls checkUpdates() on startup so the version pill populates immediately', async () => {
+  it('never calls checkUpdates() on startup — checks are manual-only', async () => {
     startUpdatePoller()
 
-    // checkUpdates() is async — flush microtasks without advancing the 30-min interval.
+    // Flush microtasks and a full interval window; no network check may fire.
     await vi.advanceTimersByTimeAsync(0)
-
-    expect(checkMock).toHaveBeenCalled()
-    expect($updateStatus.get()?.behind).toBe(5)
-  })
-
-  it('calls checkUpdates() on each interval tick', async () => {
-    startUpdatePoller()
-    await vi.advanceTimersByTimeAsync(0)
-    checkMock.mockClear()
-
     await vi.advanceTimersByTimeAsync(30 * 60 * 1000)
 
-    expect(checkMock).toHaveBeenCalled()
+    expect(checkMock).not.toHaveBeenCalled()
+    expect($updateStatus.get()).toBeNull()
   })
 
-  it('calls checkUpdates() when the window regains focus', async () => {
+  it('does not re-check on the background interval or window focus', async () => {
     startUpdatePoller()
-    await vi.advanceTimersByTimeAsync(0)
-    checkMock.mockClear()
-
-    // Invoke the registered focus handler directly (the mock window doesn't
-    // propagate DOM events, so call the stored listener).
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1000)
     listeners['focus']?.()
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1000)
 
-    await vi.advanceTimersByTimeAsync(0)
+    expect(checkMock).not.toHaveBeenCalled()
+  })
 
-    expect(checkMock).toHaveBeenCalled()
+  it('still wires apply-progress streaming so user-initiated updates render stages', () => {
+    startUpdatePoller()
+
+    expect(onProgressMock).toHaveBeenCalled()
   })
 })
