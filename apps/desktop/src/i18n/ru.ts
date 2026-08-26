@@ -1,4 +1,4 @@
-import { defineLocale } from './define-locale'
+import { defineLocale, type TranslationOverrides } from './define-locale'
 import { ruExtra1 } from './ru-extra-1'
 import { ruExtra2 } from './ru-extra-2'
 import { ruExtra3 } from './ru-extra-3'
@@ -20,7 +20,7 @@ function deepMerge<T>(base: T, override: T): T {
   return (override ?? base) as T
 }
 
-const ruBase = {
+const ruBase: TranslationOverrides = {
   common: {
     apply: 'Применить',
     back: 'Назад',

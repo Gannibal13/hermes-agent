@@ -58,9 +58,9 @@ const SLASH_GROUP_LABELS_RU: Record<string, string> = {
   themes: 'Темы'
 }
 
-function slashGroupLabel(group: string): string {
-  if (getRuntimeI18nLocale() !== 'ru') {
-    return group
+function slashGroupLabel(group: string | undefined): string {
+  if (!group || getRuntimeI18nLocale() !== 'ru') {
+    return group ?? ''
   }
 
   return SLASH_GROUP_LABELS_RU[group.toLowerCase()] ?? group
