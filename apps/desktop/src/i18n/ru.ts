@@ -222,6 +222,30 @@ export const ru = defineLocale({
     dismiss: 'Скрыть'
   },
 
+  sendDiagnostics: {
+    title: 'Отправить диагностику в Nous',
+    privacyNotice:
+      'Загружает отладочный пакет во внутреннее хранилище Nous (без публичного доступа). Он содержит сведения о системе (ОС, версии, провайдер и список настроенных API-ключей — без самих ключей), а также полные журналы агента, шлюза и приложения (до 512 КБ каждый). В журналах могут быть тексты диалогов, результаты работы инструментов и пути к файлам. Перед загрузкой секретные данные скрываются. Пакет доступен только сотрудникам Nous и доверенным модераторам Discord и автоматически удаляется через 14 дней.',
+    upload: 'Загрузить',
+    uploading: 'Загрузка…',
+    cancel: 'Отмена',
+    close: 'Закрыть',
+    copyLink: 'Скопировать ссылку',
+    uploadIdFallback: id => `Ссылка не возвращена — сообщите ID загрузки ${id} в поддержку`,
+    doneTitle: 'Диагностика отправлена',
+    doneDescription:
+      'Ваш пакет загружен приватно. Поделитесь ссылкой ниже в теме поддержки, чтобы команда увидела ваши логи.',
+    failedTitle: 'Загрузка не удалась',
+    failedHint:
+      'Вы также можете запустить `hermes debug share --nous` в терминале или `hermes debug share --local` для вывода отчёта без загрузки.',
+    handoffLead: 'Продолжите обсуждение в:',
+    links: {
+      github: 'GitHub Issues',
+      portal: 'Поддержка Nous Portal',
+      discord: 'Discord'
+    }
+  },
+
   titlebar: {
     hideSidebar: 'Скрыть боковую панель',
     showSidebar: 'Показать боковую панель',
@@ -240,6 +264,7 @@ export const ru = defineLocale({
     openStarmap: 'Открыть граф памяти',
     enterHud: 'Режим HUD',
     exitHud: 'Выйти из режима HUD',
+    resetHudLayout: 'Сбросить размер и положение HUD',
     layoutEditor: 'Редактор раскладки',
     layoutEditorTitle: mod => `Редактор раскладки — ${mod}-клик сбрасывает раскладку`
   },
@@ -1061,6 +1086,24 @@ export const ru = defineLocale({
       cancel: 'Отмена',
       empty: 'Соединения пока не зарегистрированы.'
     },
+    managedUpdates: {
+      title: 'Управляемые обновления',
+      intro:
+        'Безопасное обновление SSH-установок под управлением приложения: активные сеансы корректно завершаются, удалённая установка обновляется, а каждый профиль восстанавливается с привязанным отчётом.',
+      sshConnection: 'SSH-установка под управлением приложения',
+      update: 'Обновить',
+      updating: 'Обновление…',
+      progress: 'Завершение сеансов, обновление удалённой установки и восстановление профилей…',
+      updated: 'Обновлено',
+      partial: 'Обновлено — восстановление не удалось',
+      refused: 'Отклонено',
+      failed: 'Обновление не удалось',
+      alreadyRunning: 'Обновление уже выполняется',
+      receipt: (id, outcome) => `Отчёт ${id} · ${outcome}`,
+      receiptVersions: (pre, post) => `${pre} → ${post}`,
+      scopesRestored: profiles => `Восстановлены профили: ${profiles}`,
+      scopeNotRestored: (profile, error) => `Профиль «${profile}» не восстановлен: ${error}`
+    },
     gateway: {
       loading: 'Загрузка настроек шлюза…',
       unavailableTitle: 'Настройки шлюза недоступны',
@@ -1340,6 +1383,121 @@ export const ru = defineLocale({
         curator: { label: 'Куратор', hint: 'Просмотр использования навыков' }
       }
     },
+    localModels: {
+      title: 'Локальные модели',
+      runtimeTitle: 'Локальная среда выполнения',
+      runtimeReady: backend => `Готово · ${backend}`,
+      serverRunning: 'Запущено',
+      runtimeInstalled: 'Среда выполнения llama.cpp установлена',
+      runtimeInstalledDetail: (tag, backend) =>
+        `Сборка ${tag}, бэкенд ${backend}. Hermes запускает и управляет сервером за вас.`,
+      installTitle: 'Установить локальную среду выполнения',
+      installDetail:
+        'Скачивает движок вывода llama.cpp (несколько сотен мегабайт). Скачиваемые модели работают целиком на этом компьютере — никаких аккаунтов, ничего не покидает ваш компьютер.',
+      installAction: 'Установить среду выполнения',
+      installing: 'Установка среды выполнения…',
+      installFailed: 'Установка среды выполнения не удалась',
+      hardwareTitle: 'Этот компьютер',
+      hardwareLoading: 'Проверка оборудования…',
+      vram: label => `${label} память GPU`,
+      ram: label => `${label} оперативная память`,
+      unifiedMemory: 'Единая память',
+      modelsTitle: 'Модели',
+      recommended: 'Рекомендовано',
+      recommendedReason: {
+        'best-quality-resident':
+          'Наивысшее качество, работающее целиком на GPU на полной скорости. Выбор основывается на качестве и предполагаемой скорости на этом оборудовании.',
+        'speed-gated-quality':
+          'Более качественная модель помещается, но слишком медленная для пропускной способности памяти — это лучшая модель, которая остаётся быстрой.',
+        'fastest-resident':
+          'Ни одна модель не достигает полной скорости на этом оборудовании; эта ближе всего к ней и целиком помещается в память GPU.',
+        'least-painful-spilled': 'Ни одна модель не помещается целиком в памяти GPU — эта лучше всех работает из оперативной памяти.'
+      } as Record<string, string>,
+      downloaded: 'Скачано',
+      downloadAction: size => `Скачать · ${size}`,
+      downloadProgress: (done, total) => `Скачивание ${done} из ${total}`,
+      downloadDoneToast: model => `${model} готова.`,
+      installDoneToast: 'Локальная среда выполнения установлена и готова.',
+      quickstartTitle: 'Запустить модель на этом компьютере',
+      quickstartDetail: (model, size) =>
+        `В один шаг настраивается всё: локальный движок, скачивание ${model} (${size}) и выбор этой модели по умолчанию для новых чатов. Данные не покидают этот компьютер.`,
+      quickstartDetailReady: model =>
+        `Одним кликом ${model} станет вашей моделью по умолчанию для новых чатов. Всё работает на этом компьютере.`,
+      quickstartAction: 'Настроить за меня',
+      quickstartConfigure: 'Настроить…',
+      quickstartDoneToast: model => `${model} настроена — новые чаты работают на этом компьютере.`,
+      quickstartFailed: 'Настройка локальной модели не удалась',
+      quickstartStageEngine: 'Движок',
+      quickstartStageModel: 'Модель',
+      quickstartStageFinish: 'Готово',
+      useAction: 'Использовать',
+      activePill: 'По умолчанию',
+      updateTitle: 'Доступно обновление движка',
+      updateDetail: (next, current) =>
+        `Новая сборка llama.cpp (${next}) готова к установке — у вас ${current}. Модели продолжают работать во время скачивания.`,
+      updateAction: 'Обновить движок',
+      updating: 'Обновление движка…',
+      upToDateTitle: 'Движок актуален',
+      upToDateDetail: (tag, backend) => `Работает llama.cpp ${tag} (${backend}) — последняя сборка Hermes.`,
+      updateToast: next => `Доступна новая сборка локального движка (${next}). Обновите через Настройки → Локальные модели.`,
+      activeDetail: 'Новые чаты используют эту модель — она загружается при первом сообщении',
+      activeNotLoaded: 'Загрузится при первом сообщении',
+      loadedPill: 'В памяти',
+      placementResident: 'целиком в GPU',
+      placementSpilled: 'частично в RAM',
+      placementResidentTip: 'Работает целиком в памяти GPU при этом окне контекста — полная скорость.',
+      placementSpilledTip:
+        'Часть модели работает из оперативной памяти — работает, но медленнее. Более компактная сборка или меньшее окно контекста поместятся полностью.',
+      loadingPill: 'Загрузка…',
+      ejectTip: 'Освободить память GPU (загрузится снова при следующем сообщении)',
+      ejected: 'Модель выгружена — память GPU освобождена.',
+      ejectFailed: 'Не удалось выгрузить модель',
+      stopServer: 'Выключить',
+      startServer: 'Включить',
+      runtimeRunningDetail:
+        'Локальный сервер запущен. Выключение освобождает всю память GPU и прекращает использование локальных моделей до повторного включения.',
+      serverStopped: 'Локальный сервер остановлен — память GPU освобождена.',
+      serverStarted: 'Локальный сервер запущен.',
+      serverStopFailed: 'Не удалось остановить локальный сервер',
+      serverStartFailed: 'Не удалось запустить локальный сервер',
+      activating: 'Запуск…',
+      activateFailed: model => `Не удалось переключиться на ${model}`,
+      activateDoneToast: model => `Новые чаты используют ${model}.`,
+      downloadFailed: model => `Скачивание ${model} не удалось`,
+      pillFitsGpu: 'Помещается в вашу GPU',
+      pillUsesRam: 'Использует оперативную память',
+      pillTooBig: 'Слишком большая для этого компьютера',
+      browseTitle: 'Найти больше моделей',
+      browseHint:
+        'Поиск по всему Hugging Face. Скачиваемые модели автоматически подбираются под ваш компьютер, но нами не проверяются.',
+      browsePlaceholder: 'Поиск моделей по имени или автору…',
+      browseSearching: 'Поиск на Hugging Face',
+      browseListing: 'Чтение файлов модели',
+      browseShowFiles: 'Показать файлы',
+      browseRefresh: 'Обновить',
+      browseDownloads: 'скачиваний',
+      browseLikes: 'лайков',
+      browseGated: 'требуется вход на Hugging Face',
+      browseNoGguf: 'Совместимые файлы модели не найдены.',
+      browseFitUnknown: 'Помещаемость неизвестна',
+      browseAlreadyDownloaded: 'Уже скачано.',
+      addedByYou: 'Добавлено вами',
+      browseDownloadStarted: 'Скачивание {name}',
+      browseDownloadAria: 'Скачать {name}',
+      sideloadButton: 'Добавить файл модели',
+      sideloadTitle: 'Выберите файл модели GGUF',
+      sideloadDone: '{name} добавлена.',
+      sideloadAlreadyPresent: 'Уже в вашей библиотеке.',
+      pillFullContext: max => `Полный контекст ${max}`,
+      pillFullContextTip: 'Работает при полном окне контекста модели с самого начала',
+      pillUpTo: max => `Контекст до ${max}`,
+      pillGrowsTip: 'Автоматически расширяется по мере необходимости',
+      pillVision: 'Видит изображения',
+      deleteAction: 'Удалить модель',
+      deleteConfirm: model => `Удалить ${model} с диска?`,
+      deleted: model => `${model} удалена.`,
+      deleteFailed: 'Удаление не удалось'
+    },
     providers: {
       connectAccount: 'Подключить аккаунт',
       haveApiKey: 'Ввести API-ключ вместо этого?',
@@ -1539,6 +1697,8 @@ export const ru = defineLocale({
     archive: 'В архив',
     skillArchivedTitle: 'Навык в архиве',
     skillArchivedMessage: 'Восстановить через hermes curator restore.',
+    officialCatalog: 'Доступно для установки',
+    officialPill: 'Официальный',
     hub: {
       searchPlaceholder: 'Поиск в хабе навыков',
       search: 'Поиск',
@@ -2084,6 +2244,46 @@ export const ru = defineLocale({
     switchConnectionFailed: name => `Не удалось подключиться к ${name}`,
     manageProfiles: 'Управлять профилями…',
     connectGateway: 'Управлять шлюзами…',
+    fleet: {
+      allOnGateway: 'Все профили на этом шлюзе',
+      gateway: gateway => `Профили на ${gateway}`,
+      gatewayUnreachable: gateway => `${gateway} · недоступен`,
+      onGateway: (name, gateway) => `${name} · ${gateway}`,
+      switchTo: (name, gateway) => `Переключиться на ${name} на ${gateway}`,
+      deleteOn: gateway => ` на ${gateway}`
+    },
+    remoteOverride: {
+      menuItem: 'Подключиться к удалённому хосту…',
+      badge: (host: string) => `Работает на ${host}`,
+      title: (profile: string) => `Подключить ${profile} к удалённому хосту`,
+      description: 'Сеансы этого профиля будут работать на указанном удалённом Hermes, а не на этом компьютере.',
+      urlLabel: 'Удалённый адрес',
+      urlPlaceholder: 'https://hermes.example.com',
+      urlInvalid: 'Введите полный адрес, начинающийся с http:// или https://',
+      tokenLabel: 'Токен доступа',
+      tokenPlaceholder: 'Вставьте токен удалённого сеанса',
+      tokenSavedHint: 'Токен уже сохранён. Оставьте поле пустым, чтобы сохранить его.',
+      plainTextOptIn:
+        'На этом компьютере нет безопасного хранилища ключей, поэтому токен будет сохранён на диске без шифрования. Всё равно сохранить его?',
+      collisionWarning: (label: string) =>
+        `Шлюз с именем «${label}» уже существует в настройках. Это подключение профиля отдельное и не изменит его.`,
+      confirmTitle: 'Подключить этот профиль к удалённому хосту?',
+      confirmNote: (profile: string, host: string) =>
+        `Новые чаты в профиле ${profile} будут работать на ${host}. Этот компьютер будет выполнять команды и читать файлы там, а не здесь. Подключайтесь только к хосту, которому доверяете.`,
+      confirmBack: 'Назад',
+      connect: 'Подключить',
+      connecting: 'Подключение…',
+      disconnect: 'Удалить удалённое подключение',
+      savedTitle: 'Профиль подключён',
+      savedMessage: (profile: string, host: string) => `${profile} теперь работает на ${host}`,
+      removedTitle: 'Удалённое подключение удалено',
+      removedMessage: (profile: string) => `${profile} теперь работает на этом компьютере`,
+      removeFailed: 'Не удалось удалить удалённое подключение',
+      authFailedTitle: 'Удалённый хост отклонил сохранённый токен',
+      authFailedMessage: (profile: string, host: string) =>
+        `${host} отклонил токен, сохранённый для ${profile}. Возможно, на удалённой стороне его изменили.`,
+      updateToken: 'Ввести новый токен…'
+    },
     actions: 'Действия',
     color: 'Цвет…',
     colorFor: 'Цвет',
@@ -2099,6 +2299,7 @@ export const ru = defineLocale({
     defaultBadge: 'По умолчанию',
     rename: 'Переименовать',
     renameMenu: 'Переименовать…',
+    exportMenu: 'Экспортировать…',
     editSoul: 'Изменить SOUL.md…',
     copySetup: 'Скопировать команду установки',
     copying: 'Копирование...',
@@ -2924,6 +3125,8 @@ export const ru = defineLocale({
     connected: 'Подключено',
     featuredPitch: 'Одна подписка, 300+ передовых моделей — рекомендуемый способ запускать Hermes',
     fireworksPitch: 'Прямой API моделей — передовые модели на хостинге Fireworks',
+    localModelsTitle: 'Запускайте модели локально',
+    localModelsPitch: 'Учётная запись не нужна — скачайте модель и запускайте её на этом компьютере',
     openRouterPitch: 'Один ключ, сотни моделей — надёжный вариант по умолчанию',
     apiKeyOptions: {
       fireworks: {
@@ -2961,6 +3164,8 @@ export const ru = defineLocale({
     connectedProvider: provider => `${provider} подключён`,
     connectedPicking: provider => `${provider} подключён. Выбираем модель по умолчанию...`,
     signInFailed: 'Вход не удался. Попробуйте снова.',
+    signInExpired:
+      'Срок входа истёк в ожидании авторизации. Обычно это означает, что страница входа зависла в открытой вкладке (проблема на стороне сервера) — завершите вход там и попробуйте снова. Если ошибка не исчезнет, используйте API-ключ или запасной вариант через CLI.',
     pickDifferentProvider: 'Выбрать другого провайдера',
     signInWith: provider => `Войти через ${provider}`,
     openedBrowser: provider => `Мы открыли ${provider} в вашем браузере.`,
@@ -2995,6 +3200,9 @@ export const ru = defineLocale({
     noModels: 'Модели не найдены.',
     addProvider: 'Добавить провайдера',
     loadFailed: 'Не удалось загрузить модели',
+    loadingIntoMemory: 'Загрузка в память',
+    downloading: 'Скачивание',
+    localDownloadsHeading: 'Локальные',
     noAuthenticatedProviders: 'Нет провайдеров с аутентификацией.',
     pro: 'Pro',
     proNeedsSubscription: 'Модели Pro требуют платной подписки Nous.',
@@ -3197,6 +3405,9 @@ export const ru = defineLocale({
     hide: 'Скрыть',
     openPreview: 'Открыть предпросмотр',
     openInBrowser: 'Открыть в браузере',
+    openInExternal: 'Открыть во внешнем приложении',
+    popIn: 'Встроить',
+    popOut: 'Открыть отдельно',
     linkHint: '⌘/Ctrl-клик — панель предпросмотра',
     sourceLineTitle: 'Клик — выбрать · Shift-клик — расширить · перетащите в композер',
     source: 'ИСТОЧНИК',
@@ -3307,6 +3518,7 @@ export const ru = defineLocale({
     closeToRight: 'Закрыть справа',
     closeAll: 'Закрыть все',
     newSessionTab: 'Вкладка нового сеанса',
+    newTab: 'Новая вкладка',
     pluginDisabled: pluginId => `Плагин «${pluginId}» отключён`,
     pluginDisabledBody: 'Включите его снова в Настройки → Плагины, чтобы вернуть панель.',
     missingPane: paneId => `нет панели: ${paneId}`,
@@ -3596,6 +3808,10 @@ export const ru = defineLocale({
     editFailed: 'Изменение не удалось',
     editTurnUnavailable: 'Этого хода больше нет в истории сервера (возможно, он был сжат).',
     resumeFailed: 'Возобновление не удалось',
+    readOnlyTranscriptTitle: 'Открыто только для чтения',
+    readOnlyTranscriptBody:
+      'Пока ни один подключённый бэкенд не обслуживает этот старый чат, поэтому он открыт как транскрипт только для чтения. История сохранена; отправка сообщений отключена, пока его не возьмёт под управление бэкенд.',
+    readOnlyTranscriptSendBlocked: 'Этот чат открыт как транскрипт только для чтения — отправка сообщений отключена.',
     resumeStrandedTitle: 'Не удалось загрузить этот сеанс',
     resumeStrandedBody:
       'Соединение с этим сеансом оборвалось, и автоматические повторные попытки исчерпаны. Проверьте, что шлюз работает, и попробуйте снова.',
@@ -3614,6 +3830,7 @@ export const ru = defineLocale({
     cwdStagedTitle: 'Рабочий каталог поставлен в очередь',
     cwdStagedMessage: 'Перезапустите бэкенд desktop, чтобы применить изменения cwd к этому активному сеансу.',
     modelSwitchFailed: 'Смена модели не удалась',
+    hydrationSyncing: (profile: string) => `Синхронизация ${profile}\u2026`,
     sessionExported: 'Сеанс экспортирован',
     sessionExportFailed: 'Не удалось экспортировать сеанс',
     imageSaved: 'Изображение сохранено',
@@ -3639,6 +3856,52 @@ export const ru = defineLocale({
       systemNote: platform => `↻ Передано в ${platform} — возобновите здесь в любой момент.`,
       failed: error => `Передача не удалась: ${error}`,
       timedOut: 'Превышено время ожидания шлюза. Выполняется ли `hermes gateway`?'
+    }
+  },
+  tips: {
+    close: 'Больше не показывать этот совет',
+    items: {
+      'new-session': {
+        title: 'Начните заново',
+        text: 'Новый чат получает свой собственный контекст, терминал и рабочую директорию.'
+      },
+      skills: {
+        title: 'Научите один раз',
+        text: 'Навыки — это папки с инструкциями, которые Hermes загружает по мере необходимости.'
+      },
+      messaging: {
+        title: 'Hermes всегда с вами',
+        text: 'Подключите Telegram, Discord, Slack и другие сервисы — тот же агент и та же память.'
+      },
+      artifacts: {
+        title: 'Всё, что создал Hermes',
+        text: 'Изображения, файлы и ссылки из каждого сеанса, индексированные в одном месте.'
+      },
+      cron: {
+        title: 'Работа, которая запускается сама',
+        text: 'Запланируйте запрос на определённое время, на ночь или по расписанию cron.'
+      },
+      'command-palette': {
+        title: 'Всё под рукой',
+        text: 'Сеансы, настройки, навыки и команды — всё доступно из палитры.'
+      },
+      profiles: {
+        title: 'Профили независимы',
+        text: 'Каждый — отдельный Hermes: свои ключи, своя память, свои сеансы.'
+      },
+      'composer-mentions': {
+        title: 'Вложения и команды',
+        text: 'Введите @, чтобы добавить файл в разговор, / — чтобы выполнить команду.'
+      },
+      'local-setup': {
+        title: 'Эта машина может запускать модели локально',
+        text: 'Ваше оборудование способно работать с локальной моделью. Чаты остаются на вашем компьютере и ничего не стоят.',
+        action: 'Настроить'
+      },
+      'right-pane': {
+        title: 'Рабочая панель',
+        text: 'Файлы, терминал, ревью и встроенный браузер — справа.'
+      }
     }
   },
   errors: {
