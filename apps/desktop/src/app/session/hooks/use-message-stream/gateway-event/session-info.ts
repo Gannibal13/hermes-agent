@@ -416,7 +416,10 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
 
     if (modelValueChanged || providerValueChanged) {
       void queryClient.invalidateQueries({
-        queryKey: explicitSid && sessionId ? modelOptionsQueryKey(activeGatewayProfile, sessionId) : ['model-options']
+        queryKey:
+          explicitSid && sessionId
+            ? modelOptionsQueryKey(activeGatewayProfile, sessionId, event.connectionId)
+            : ['model-options']
       })
     }
 

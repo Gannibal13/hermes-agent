@@ -1,6 +1,7 @@
 import { translateNow } from '@/i18n'
 import { textPart } from '@/lib/chat-messages'
 import { coerceGatewayText } from '@/lib/chat-runtime'
+import { invalidateModelOptionsForRevision } from '@/lib/model-options'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
 import { type AgentNoticePayload, clearAgentNotice, nativeNoticeInput, showAgentNotice } from '@/store/agent-notices'
 import { clearClarifyRequest } from '@/store/clarify'
@@ -12,10 +13,13 @@ import { isDiskFullErrorMessage, notify, notifyError } from '@/store/notificatio
 import { requestDesktopOnboarding } from '@/store/onboarding'
 import { flashPetActivity, setPetActivity } from '@/store/pet'
 import { clearAllPrompts } from '@/store/prompts'
-import { setTurnStartedAt } from '@/store/session'
+import { setEffectiveModelRoute, setTurnStartedAt } from '@/store/session'
 import { clearActiveSessionTodos } from '@/store/todos'
 
 import type { GatewayEventContext } from './types'
+
+const quotaFailoverEventIdsByQueryClient = new WeakMap<object, Set<string>>()
+const quotaCatalogRevisionByQueryClient = new WeakMap<object, { current: number | null }>()
 
 /** status.update / review.summary / notification.show / notification.clear /
  *  error — the status-and-notice tail of the dispatcher. */
@@ -128,6 +132,101 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
   }
 
   if (event.type === 'notification.show') {
+    const quota = event.payload as Record<string, unknown> | undefined
+
+    if (quota?.kind === 'quota_failover' || quota?.type === 'quota_failover') {
+      const eventId = typeof quota.event_id === 'string' ? quota.event_id : ''
+
+      const seen =
+        deps.quotaFailoverEventIdsRef?.current ??
+        (() => {
+          const existing = quotaFailoverEventIdsByQueryClient.get(queryClient)
+
+          if (existing) {
+            return existing
+          }
+
+          const next = new Set<string>()
+          quotaFailoverEventIdsByQueryClient.set(queryClient, next)
+
+          return next
+        })()
+
+      if (eventId && seen?.has(eventId)) {
+        return true
+      }
+
+      if (eventId) {
+        seen?.add(eventId)
+      }
+
+      const exclusions = quota.quota_exclusions as Record<string, unknown> | undefined
+      const revision = quota.catalog_revision ?? exclusions?.catalog_revision
+      let revisionRef = deps.quotaCatalogRevisionRef
+
+      if (!revisionRef) {
+        revisionRef = quotaCatalogRevisionByQueryClient.get(queryClient)
+
+        if (!revisionRef) {
+          revisionRef = { current: null }
+          quotaCatalogRevisionByQueryClient.set(queryClient, revisionRef)
+        }
+      }
+
+      void invalidateModelOptionsForRevision(queryClient, revision, revisionRef)
+
+      const status = String(quota.status ?? quota.action ?? quota.event ?? quota.state ?? '')
+        .toLowerCase()
+        .replace(/^route_/, '')
+
+      const to = quota.to as Record<string, unknown> | undefined
+
+      const route =
+        typeof quota.to === 'string'
+          ? quota.to
+          : typeof quota.route_key === 'string'
+            ? quota.route_key
+            : typeof to?.provider === 'string' && typeof to?.model === 'string'
+              ? `${to.provider}:${to.model}`
+              : ''
+
+      const from = typeof quota.from === 'string' ? quota.from : ''
+      const routeParts = route.split(':')
+      const effectiveRoute = routeParts.length >= 2 ? { provider: routeParts[0], model: routeParts.slice(1).join(':') } : null
+      const eventRevision = typeof quota.revision === 'number' ? quota.revision : undefined
+
+      if (status === 'activated' || status === 'active') {
+        setEffectiveModelRoute(effectiveRoute, eventRevision)
+      } else if (status === 'exhausted') {
+        setEffectiveModelRoute(null, eventRevision)
+      }
+
+      if (status === 'excluded') {
+        notify({
+          id: eventId ? `quota-failover:${eventId}` : undefined,
+          kind: 'warning',
+          title: 'Model quota reached',
+          message: route ? `${route} was excluded from automatic failover.` : 'A model was excluded from automatic failover.'
+        })
+      } else if (status === 'activated' || status === 'active') {
+        notify({
+          id: eventId ? `quota-failover:${eventId}` : undefined,
+          kind: 'info',
+          title: 'Automatic model failover',
+          message: route ? `Switched to ${route}${from ? ` from ${from}` : ''}.` : 'Switched to an eligible model.'
+        })
+      } else if (status === 'exhausted' || quota.to === null) {
+        notify({
+          id: eventId ? `quota-failover:${eventId}` : undefined,
+          kind: 'error',
+          title: 'Automatic model failover exhausted',
+          message: 'No eligible free model route remains. Choose a model manually.'
+        })
+      }
+
+      return true
+    }
+
     // Driver-agnostic agent notice (credits usage/grant/depleted/restored
     // from `agent/credits_tracker.py`). The Ink TUI renders these in its
     // status bar; the desktop renders them as toasts. The notice key doubles

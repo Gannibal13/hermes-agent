@@ -12,6 +12,8 @@ export interface GatewayEventDeps {
   compactedTurnRef: MutableRefObject<Set<string>>
   lastCwdInfoSessionRef: MutableRefObject<string | null>
   nativeSubagentSessionsRef: MutableRefObject<Set<string>>
+  quotaFailoverEventIdsRef?: MutableRefObject<Set<string>>
+  quotaCatalogRevisionRef?: MutableRefObject<number | null>
   appendAssistantDelta: (sessionId: string, delta: string, occurredAt?: number) => void
   appendReasoningDelta: (sessionId: string, delta: string, replace?: boolean, occurredAt?: number) => void
   completeAssistantMessage: (

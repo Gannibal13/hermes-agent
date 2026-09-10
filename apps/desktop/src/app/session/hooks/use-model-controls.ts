@@ -6,8 +6,8 @@ import { getGlobalModelInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { isBusySessionModelSwitch } from '@/lib/gateway-rpc'
 import { surfaceModelSwitchConfirm } from '@/lib/guarded-model-switch'
-import { manualPickRemoved, modelOptionsQueryKey } from '@/lib/model-options'
-import { notifyError } from '@/store/notifications'
+import { autoFailoverRoutes, manualPickRemoved, modelOptionsQueryKey } from '@/lib/model-options'
+import { notify, notifyError } from '@/store/notifications'
 import { $activeGatewayProfile } from '@/store/profile'
 import {
   $activeSessionId,
@@ -15,10 +15,11 @@ import {
   $currentProvider,
   getComposerSelectionGeneration,
   getCurrentModelSource,
-  markComposerSelectionManual,
   setCurrentModel,
   setCurrentModelSource,
-  setCurrentProvider
+  setCurrentProvider,
+  setEffectiveModelRoute,
+  setManualModelRoute
 } from '@/store/session'
 import { $sessionStates, sessionTileDelegate } from '@/store/session-states'
 import type { ModelOptionsResponse } from '@/types/hermes'
@@ -143,6 +144,40 @@ export function useModelControls({
           return !manualPickRemoved(options?.providers, $currentProvider.get(), $currentModel.get())
         }
 
+        const cachedOptions = queryClient.getQueryData<ModelOptionsResponse>(
+          modelOptionsQueryKey(cacheProfile || $activeGatewayProfile.get(), null, cacheOwnerConnectionId)
+        )
+
+        const savedRouteKey = `${$currentProvider.get()}:${$currentModel.get()}`
+        const savedRouteExcluded = cachedOptions?.quota_exclusions?.excluded_route_keys.includes(savedRouteKey) ?? false
+
+        if (getCurrentModelSource() === 'manual' && savedRouteExcluded) {
+          const alternative = autoFailoverRoutes(cachedOptions)
+
+          if (alternative.length > 0) {
+            setCurrentModel(alternative[0].model)
+            setCurrentProvider(alternative[0].provider)
+            setCurrentModelSource('default')
+            setEffectiveModelRoute(alternative[0])
+            notify({
+              kind: 'info',
+              title: 'Automatic model failover',
+              message: `Your saved model is quota-excluded; using ${alternative[0].provider}:${alternative[0].model}.`
+            })
+          } else {
+            setCurrentModel('')
+            setCurrentProvider('')
+            setEffectiveModelRoute(null)
+            notify({
+              kind: 'error',
+              title: 'Automatic model failover exhausted',
+              message: 'Your saved model is quota-excluded and no eligible free route remains.'
+            })
+          }
+
+          return
+        }
+
         if (keepManualPick()) {
           return
         }
@@ -214,9 +249,7 @@ export function useModelControls({
 
       const paintSelection = () => {
         if (touchesPrimary) {
-          setCurrentModel(selection.model)
-          setCurrentProvider(selection.provider)
-          markComposerSelectionManual()
+          setManualModelRoute({ model: selection.model, provider: selection.provider })
         } else if (liveSessionId) {
           // Optimistic tile paint — session.info will confirm; rollback on error.
           sessionTileDelegate()?.updateSession(liveSessionId, state => ({

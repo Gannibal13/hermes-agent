@@ -20,6 +20,10 @@ import { clearUnreadOnOpen } from './session-unread-remote'
 
 type Updater<T> = T | ((current: T) => T)
 export type ComposerModelSource = '' | 'default' | 'manual'
+export interface ModelRoute {
+  model: string
+  provider: string
+}
 
 const WORKSPACE_CWD_KEY = 'hermes.desktop.workspace-cwd'
 
@@ -1088,6 +1092,17 @@ export function getSessionOwnerHint(
 export const $resumeExhaustedSessionId = atom<string | null>(null)
 export const $currentModel = atom(storedComposerString(COMPOSER_MODEL_KEY) ?? '')
 export const $currentProvider = atom(storedComposerString(COMPOSER_PROVIDER_KEY) ?? '')
+export const $preferredManualRoute = atom<ModelRoute | null>(
+  storedComposerString(COMPOSER_MODEL_SOURCE_KEY) === 'manual'
+    ? { model: $currentModel.get(), provider: $currentProvider.get() }
+    : null
+)
+export const $effectiveRoute = atom<ModelRoute | null>(
+  $currentModel.get() && $currentProvider.get()
+    ? { model: $currentModel.get(), provider: $currentProvider.get() }
+    : null
+)
+let modelRouteRevision = 0
 export const $currentReasoningEffort = atom(storedString(COMPOSER_EFFORT_KEY) ?? '')
 export const $currentServiceTier = atom('')
 export const $currentFastMode = atom(storedBoolean(COMPOSER_FAST_KEY, false))
@@ -1152,6 +1167,12 @@ function rescopeComposerSelection(nextScope: string | null): void {
   $currentModel.set(storedComposerString(COMPOSER_MODEL_KEY) ?? '')
   $currentProvider.set(storedComposerString(COMPOSER_PROVIDER_KEY) ?? '')
   $currentModelSource.set(getCurrentModelSource())
+  $preferredManualRoute.set(
+    getCurrentModelSource() === 'manual' && $currentModel.get() && $currentProvider.get()
+      ? { model: $currentModel.get(), provider: $currentProvider.get() }
+      : null
+  )
+  $effectiveRoute.set($currentModel.get() && $currentProvider.get() ? { model: $currentModel.get(), provider: $currentProvider.get() } : null)
 }
 
 /** Publish an exact registry route before active-profile effects can persist a
@@ -1325,6 +1346,33 @@ export const setCurrentProvider = (next: Updater<string>) => {
   if (key !== null) {
     persistString(key, $currentProvider.get() || null)
   }
+}
+
+export const setManualModelRoute = (route: ModelRoute): number => {
+  modelRouteRevision += 1
+  setCurrentModel(route.model)
+  setCurrentProvider(route.provider)
+  $preferredManualRoute.set({ ...route })
+  $effectiveRoute.set({ ...route })
+  markComposerSelectionManual()
+
+  return modelRouteRevision
+}
+
+export const setEffectiveModelRoute = (route: ModelRoute | null, revision?: number): boolean => {
+  if (revision !== undefined && revision < modelRouteRevision) {
+    return false
+  }
+
+  modelRouteRevision = Math.max(modelRouteRevision, revision ?? modelRouteRevision + 1)
+  $effectiveRoute.set(route ? { ...route } : null)
+
+  if (route) {
+    setCurrentModel(route.model)
+    setCurrentProvider(route.provider)
+  }
+
+  return true
 }
 
 export const getCurrentModelSource = (): ComposerModelSource => {

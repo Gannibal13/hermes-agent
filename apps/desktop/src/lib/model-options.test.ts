@@ -5,6 +5,8 @@ import { getGlobalModelOptions } from '@/hermes'
 
 import {
   firstSelectableCatalogModel,
+  autoFailoverRoutes,
+  invalidateModelOptionsForRevision,
   manualPickRemoved,
   modelOptionsQueryKey,
   reconcileSelectionAfterCatalogRefresh,
@@ -212,6 +214,28 @@ describe('modelOptionsQueryKey', () => {
 
     expect(queryClient.getQueryData(sourceAKey)).toMatchObject({ providers: [{ models: ['a/model'] }] })
     expect(queryClient.getQueryData(sourceBKey)).toMatchObject({ providers: [{ models: ['b/model'] }] })
+  })
+})
+
+describe('automatic failover catalog rules', () => {
+  it('fails closed on ineligible rows and excluded routes', () => {
+    expect(
+      autoFailoverRoutes({
+        providers: [
+          { name: 'Metered', slug: 'metered', models: ['paid'], auto_failover_eligible: false },
+          { name: 'Free', slug: 'free', models: ['used', 'available'], auto_failover_eligible: true }
+        ]
+      }, { catalog_revision: 4, excluded_route_keys: ['free:used'] })
+    ).toEqual([{ provider: 'free', model: 'available' }])
+  })
+
+  it('invalidates only when the catalog revision advances', async () => {
+    const invalidateQueries = vi.fn(() => Promise.resolve())
+    const previousRevision = { current: null as number | null }
+
+    await expect(invalidateModelOptionsForRevision({ invalidateQueries }, 2, previousRevision)).resolves.toBe(true)
+    await expect(invalidateModelOptionsForRevision({ invalidateQueries }, 2, previousRevision)).resolves.toBe(false)
+    expect(invalidateQueries).toHaveBeenCalledTimes(1)
   })
 })
 

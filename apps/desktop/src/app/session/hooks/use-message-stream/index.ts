@@ -198,6 +198,8 @@ export function useMessageStream({
   // can cancel it instead of letting parked callbacks pile up while hidden.
   const measureRafRef = useRef<number | null>(null)
   const nativeSubagentSessionsRef = useRef<Set<string>>(new Set())
+  const quotaFailoverEventIdsRef = useRef<Set<string>>(new Set())
+  const quotaCatalogRevisionRef = useRef<number | null>(null)
   // Turns that auto-compacted: skip post-turn hydrate so live scrollback survives.
   const compactedTurnRef = useRef<Set<string>>(new Set())
   // Last session we applied a session.info cwd for — lets us tell an agent
@@ -866,6 +868,8 @@ export function useMessageStream({
     compactedTurnRef,
     lastCwdInfoSessionRef,
     nativeSubagentSessionsRef,
+    quotaFailoverEventIdsRef,
+    quotaCatalogRevisionRef,
     completeAssistantMessage,
     failAssistantMessage,
     flushQueuedDeltas,

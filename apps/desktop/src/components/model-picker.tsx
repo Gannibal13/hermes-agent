@@ -147,6 +147,7 @@ export function ModelPickerDialog({
   }, [open, refetchOptions])
 
   const providers = modelOptions.data?.providers ?? []
+  const excludedRoutes = new Set(modelOptions.data?.quota_exclusions?.excluded_route_keys ?? [])
 
   const { model: optionsModel, provider: optionsProvider } = currentPickerSelection(
     { model: currentModel, provider: currentProvider },
@@ -198,6 +199,7 @@ export function ModelPickerDialog({
               currentProvider={optionsProvider || currentProvider}
               downloads={downloads}
               error={error}
+              excludedRoutes={excludedRoutes}
               loading={loading}
               loadingModels={loadingModels}
               onSelectModel={selectModel}
@@ -223,6 +225,7 @@ export function ModelPickerDialog({
 function ModelResults({
   loading,
   error,
+  excludedRoutes,
   providers,
   currentModel,
   currentProvider,
@@ -233,6 +236,7 @@ function ModelResults({
 }: {
   loading: boolean
   error: string | null
+  excludedRoutes: Set<string>
   providers: ModelOptionProvider[]
   currentModel: string
   currentProvider: string
@@ -311,6 +315,11 @@ function ModelResults({
               const isCurrent = model === currentModel && provider.slug === currentProvider
               const price = provider.pricing?.[model]
               const locked = unavailable.has(model)
+
+              const quotaLocked =
+                provider.auto_failover_eligible === false || excludedRoutes.has(`${provider.slug}:${model}`)
+
+              const disabled = locked || quotaLocked
               // Managed local model loading into memory right now: show the
               // real load percent inline (keyed by exact model id — remote
               // providers never match).
@@ -322,15 +331,16 @@ function ModelResults({
                     'flex items-center gap-2 pl-6 font-mono',
                     isCurrent &&
                       'bg-primary text-primary-foreground data-[selected=true]:bg-primary data-[selected=true]:text-primary-foreground',
-                    locked && 'cursor-not-allowed opacity-45'
+                    disabled && 'cursor-not-allowed opacity-45'
                   )}
-                  disabled={locked}
+                  disabled={disabled}
                   key={`${provider.slug}:${model}`}
                   onSelect={() => {
-                    if (!locked) {
+                    if (!disabled) {
                       onSelectModel(provider, model)
                     }
                   }}
+                  title={quotaLocked ? 'Unavailable: excluded from automatic quota failover.' : undefined}
                   value={`${provider.slug}:${model}`}
                 >
                   <span className="min-w-0 flex-1 truncate">
@@ -349,6 +359,9 @@ function ModelResults({
                   )}
                   {locked && (
                     <span className="shrink-0 text-[0.62rem] uppercase tracking-wide opacity-80">{copy.pro}</span>
+                  )}
+                  {quotaLocked && !locked && (
+                    <span className="shrink-0 text-[0.62rem] uppercase tracking-wide opacity-80">quota</span>
                   )}
                   <ModelPrice isCurrent={isCurrent} price={price} />
                 </CommandItem>

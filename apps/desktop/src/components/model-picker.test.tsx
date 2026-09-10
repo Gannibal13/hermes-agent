@@ -33,13 +33,15 @@ const OPTIONS: ModelOptionsResponse = {
       name: 'Local',
       models: ['Qwen3.6-27B-UD-Q4_K_XL'],
       is_current: true,
-      authenticated: true
+      authenticated: true,
+      auto_failover_eligible: true
     },
     {
       slug: 'nous',
       name: 'Nous',
       models: ['Hermes-4.5'],
-      authenticated: true
+      authenticated: true,
+      auto_failover_eligible: true
     }
   ]
 }
@@ -92,6 +94,19 @@ afterEach(() => {
 })
 
 describe('ModelPickerDialog download rows', () => {
+  it('keeps a quota-excluded model visible but disabled', async () => {
+    vi.mocked(requestModelOptions).mockResolvedValue({
+      ...OPTIONS,
+      quota_exclusions: { catalog_revision: 2, excluded_route_keys: ['llamacpp:Qwen3.6-27B-UD-Q4_K_XL'] }
+    })
+    renderPicker()
+
+    const row = (await screen.findByText('Qwen3.6-27B-UD-Q4_K_XL')).closest('[cmdk-item]')
+
+    expect(row?.getAttribute('aria-disabled')).toBe('true')
+    expect(row?.getAttribute('title')).toContain('quota failover')
+  })
+
   it('shows an in-flight download as a disabled progress row in the Local group', async () => {
     $localRuntimeJobs.set([DOWNLOAD_JOB])
     renderPicker()

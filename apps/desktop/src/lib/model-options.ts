@@ -109,6 +109,52 @@ interface ModelOptionsRequest {
   sessionId?: null | string
 }
 
+export interface AutoFailoverRoute {
+  model: string
+  provider: string
+}
+
+export interface QuotaExclusions {
+  catalog_revision: number
+  excluded_route_keys: string[]
+}
+
+/** Return only routes the backend has explicitly proven safe for automation. */
+export function autoFailoverRoutes(
+  options: ModelOptionsResponse | null | undefined,
+  exclusions?: QuotaExclusions | null
+): AutoFailoverRoute[] {
+  const excluded = new Set(exclusions?.excluded_route_keys ?? options?.quota_exclusions?.excluded_route_keys ?? [])
+
+  return (options?.providers ?? []).flatMap(provider =>
+    provider.auto_failover_eligible === true
+      ? (provider.models ?? [])
+          .filter(model => !excluded.has(`${provider.slug}:${model}`))
+          .map(model => ({ model, provider: provider.slug }))
+      : []
+  )
+}
+
+export function modelRouteKey(provider: string, model: string): string {
+  return `${provider}:${model}`
+}
+
+/** Invalidate every owner/session catalog when the backend publishes a newer revision. */
+export async function invalidateModelOptionsForRevision(
+  queryClient: { invalidateQueries: (filters?: { queryKey?: readonly unknown[] }) => Promise<unknown> | unknown },
+  revision: unknown,
+  previousRevision: { current: number | null }
+): Promise<boolean> {
+  if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision <= (previousRevision.current ?? -1)) {
+    return false
+  }
+
+  previousRevision.current = revision
+  await queryClient.invalidateQueries({ queryKey: ['model-options'] })
+
+  return true
+}
+
 export function modelOptionsQueryKey(
   profile: null | string | undefined,
   sessionId?: null | string,

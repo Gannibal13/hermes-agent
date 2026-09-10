@@ -21,7 +21,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import type { HermesGateway } from '@/hermes'
 import { getLocalModelsStatus } from '@/hermes'
 import { useI18n } from '@/i18n'
-import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
+import { modelOptionsQueryKey, modelRouteKey, requestModelOptions } from '@/lib/model-options'
 import { displayModelName, modelDisplayParts } from '@/lib/model-status-label'
 import { DEFAULT_REASONING_EFFORT, reasoningEffortLabel } from '@/lib/reasoning-effort'
 import { foldIncludes, normalize } from '@/lib/text'
@@ -239,6 +239,11 @@ export function ModelCatalogMenu({
 
   const providers = modelOptions.data?.providers
 
+  const excludedRoutes = useMemo(
+    () => new Set(modelOptions.data?.quota_exclusions?.excluded_route_keys ?? []),
+    [modelOptions.data?.quota_exclusions?.excluded_route_keys]
+  )
+
   // The catalog carries MoA presets as a virtual `moa` provider row. Keep it
   // out of the main groups so presets never show up twice.
   const moaPresets = useMemo(
@@ -290,6 +295,17 @@ export function ModelCatalogMenu({
   )
 
   const selectFamily = async (family: ModelFamily, provider: ModelOptionProvider) => {
+    // Manual pick stays allowed unless the backend explicitly marks the row
+    // ineligible (false) or the route is quota-excluded. Unknown/undefined
+    // (older backend without the flag) must remain selectable.
+    if (
+      provider.auto_failover_eligible === false ||
+      excludedRoutes.has(modelRouteKey(provider.slug, family.id)) ||
+      (!!family.fastId && excludedRoutes.has(modelRouteKey(provider.slug, family.fastId)))
+    ) {
+      return
+    }
+
     const caps = provider.capabilities?.[family.id]
     const preset = controller.presetFor(provider.slug, family.id)
 
@@ -503,6 +519,15 @@ export function ModelCatalogMenu({
                     const name = modelDisplayParts(family.id).name
                     const caps = group.provider.capabilities?.[family.id]
 
+                    const quotaLocked =
+                      group.provider.auto_failover_eligible === false ||
+                      excludedRoutes.has(modelRouteKey(group.provider.slug, family.id)) ||
+                      (!!family.fastId && excludedRoutes.has(modelRouteKey(group.provider.slug, family.fastId)))
+
+                    const quotaTitle = quotaLocked
+                      ? 'Unavailable: excluded from automatic quota failover.'
+                      : undefined
+
                     // Managed local model loading into memory right now:
                     // real load percent, keyed by exact model id (remote
                     // providers never collide with GGUF stems).
@@ -534,16 +559,22 @@ export function ModelCatalogMenu({
                     // submenu (reasoning/fast) is reached by HOVER, so you can
                     // tweak those without the click dismissing everything.
                     const activate = () => {
-                      if (!isCurrent) {
+                      if (!quotaLocked && !isCurrent) {
                         void selectFamily(family, group.provider)
                       }
 
-                      closeMenu()
+                      if (!quotaLocked) {
+                        closeMenu()
+                      }
                     }
+
+                    const { className: rowClassName, ...restRowProps } = kbRowProps(`${group.provider.slug}:${family.id}`)
 
                     return (
                       <DropdownMenuSub key={`${group.provider.slug}:${family.id}`}>
                         <DropdownMenuSubTrigger
+                          className={cn(rowClassName, quotaLocked && 'cursor-not-allowed opacity-50')}
+                          disabled={quotaLocked}
                           hideChevron
                           onClick={activate}
                           onKeyDown={event => {
@@ -551,7 +582,8 @@ export function ModelCatalogMenu({
                               activate()
                             }
                           }}
-                          {...kbRowProps(`${group.provider.slug}:${family.id}`)}
+                          {...restRowProps}
+                          title={quotaTitle}
                         >
                           <span className="min-w-0 flex-1 truncate">
                             <HighlightMatches foldSeparators query={search} text={name} />
@@ -580,6 +612,7 @@ export function ModelCatalogMenu({
                               size="0.75rem"
                             />
                           ) : null}
+                          {quotaLocked ? <span className="ml-auto text-[0.6rem] uppercase tracking-wide">quota</span> : null}
                         </DropdownMenuSubTrigger>
                         <ModelEditSubmenu
                           canDisableReasoning={caps?.can_disable_reasoning}

@@ -397,6 +397,8 @@ export interface ModelPricing {
 }
 
 export interface ModelOptionProvider {
+  /** True only when every route in this row is proven free for automatic failover. */
+  auto_failover_eligible?: boolean
   is_current?: boolean
   models?: string[]
   name: string
@@ -451,9 +453,14 @@ export interface ModelCapabilities {
 }
 
 export interface ModelOptionsResponse {
+  catalog_revision?: number
   model?: string
   provider?: string
   providers?: ModelOptionProvider[]
+  quota_exclusions?: {
+    catalog_revision: number
+    excluded_route_keys: string[]
+  }
 }
 
 export interface PaginatedSessions {
