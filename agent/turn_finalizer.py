@@ -487,18 +487,12 @@ def finalize_turn(
 
     _guarded_cleanup("persist_session", _persist_step, _cleanup_errors, logger)
 
-    # A failed/interrupted turn deliberately leaves the human task active so a
-    # later resume can re-anchor it. Only matching human text can clear it.
-    if completed and not interrupted and not failed:
-        _active_task_db = getattr(agent, "_session_db", None)
-        _complete_active_task = getattr(_active_task_db, "complete_active_task", None)
-        _active_source = getattr(agent, "_active_task_source", None)
-        if callable(_complete_active_task) and _active_source is not None:
-            with suppress(Exception):
-                _complete_active_task(
-                    agent.session_id, original_user_message,
-                    expected_revision=_active_source.revision,
-                )
+    # ACTIVE GOAL CONTRACT: the durable active task is NEVER auto-completed by a
+    # clean turn. It survives service-instruction turns, compaction, resume, child
+    # tasks and tool errors so execution continues after interruptions. It is
+    # replaced by the next pure human message (turn_context) or cleared by an
+    # explicit completion call — a model reply with no tool calls is not evidence
+    # the user's goal is done.
 
     # Keep the gateway's separate in-memory history snapshot current even on
     # cleanup error, so a later prompt isn't sent with a pre-turn snapshot.
