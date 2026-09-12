@@ -28,6 +28,7 @@ Probes:
 """
 
 import asyncio
+import importlib
 import json
 import sys
 import time
@@ -78,6 +79,14 @@ if sys.platform == "win32" and _REAL_PTB:
             m for m in list(sys.modules) if m.startswith("plugins.platforms.telegram")
         ]:
             del sys.modules[_name]
+        # Re-import the real library NOW so later-collected modules that do a
+        # top-level ``from telegram.error import ...`` bind against the real
+        # package. Without this, the second gateway-conftest copy reinstalls a
+        # fresh MagicMock (registry stamp absent after eviction) and those
+        # modules fail at collection with "telegram is not a package".
+        import importlib
+
+        importlib.import_module("telegram")
 
 pytestmark = [
     pytest.mark.asyncio,
