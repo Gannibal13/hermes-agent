@@ -141,7 +141,11 @@ def test_review_fork_inherits_parent_cached_system_prompt():
     _Recorder = _make_recorder_class()
 
     with patch.object(run_agent, "AIAgent", _Recorder), \
-         patch("threading.Thread", _SyncThread):
+         patch("threading.Thread", _SyncThread), \
+         patch(
+             "agent.background_review.load_background_review_settings",
+             return_value=(True, {}),
+         ):
         # The production code assigns _cached_system_prompt AFTER __init__,
         # so wrap the recorder's __setattr__ to see that post-construction
         # write from _spawn_background_review.
@@ -187,7 +191,11 @@ def test_review_fork_inherits_parent_ephemeral_system_prompt():
     )
 
     with patch.object(run_agent, "AIAgent", _Recorder), \
-         patch("threading.Thread", _SyncThread):
+         patch("threading.Thread", _SyncThread), \
+         patch(
+             "agent.background_review.load_background_review_settings",
+             return_value=(True, {}),
+         ):
         agent._spawn_background_review(
             messages_snapshot=[],
             review_memory=True,
@@ -219,7 +227,11 @@ def test_review_fork_inherits_prefill_and_provider_routing():
     _Recorder = _make_recorder_class(captured)
 
     with patch.object(run_agent, "AIAgent", _Recorder), \
-         patch("threading.Thread", _SyncThread):
+         patch("threading.Thread", _SyncThread), \
+         patch(
+             "agent.background_review.load_background_review_settings",
+             return_value=(True, {}),
+         ):
         agent._spawn_background_review(
             messages_snapshot=[],
             review_memory=True,
@@ -257,7 +269,11 @@ def test_review_fork_pins_session_start_and_session_id():
     )
 
     with patch.object(run_agent, "AIAgent", _Recorder), \
-         patch("threading.Thread", _SyncThread):
+         patch("threading.Thread", _SyncThread), \
+         patch(
+             "agent.background_review.load_background_review_settings",
+             return_value=(True, {}),
+         ):
         agent._spawn_background_review(
             messages_snapshot=[],
             review_memory=True,
