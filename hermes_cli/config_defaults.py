@@ -681,9 +681,6 @@ DEFAULT_CONFIG = {
         # falling back; clamped [0,6]. Matters for pinned calls (MoA advisors) where provider
         # fallback is not meaningful recovery.
         "transient_retries": 2,
-        # Hard cap on physical provider attempts for one auxiliary logical call, including retries,
-        # fallback and stream negotiation. 0/invalid values are clamped to the safe minimum.
-        "max_physical_requests": 8,
         # When true, the auto-chain's OpenRouter step is skipped unless the fallback model ends in
         # ":free" — a PAID lane is never used for background aux traffic even with
         # OPENROUTER_API_KEY set.

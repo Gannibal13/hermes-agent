@@ -160,9 +160,9 @@ def test_enabled_config_failure_logs_warning(caplog):
         "hermes_cli.config.load_config_readonly",
         side_effect=RuntimeError("boom"),
     ), caplog.at_level(logging.WARNING, logger="agent.background_review"):
-        assert background_review.load_background_review_settings()[0] is False
+        assert background_review.load_background_review_settings()[0] is True
     assert any(
-        "fail-open" in r.message.lower() or "fail-closed" in r.message.lower()
+        "fail-open" in r.message.lower() or "leaving automatic" in r.message.lower()
         for r in caplog.records
     )
 

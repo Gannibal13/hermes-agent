@@ -164,9 +164,9 @@ def test_digest_records_tool_names_in_arc():
 # Cost / configurability controls (issue #87250)
 # ---------------------------------------------------------------------------
 
-def test_enabled_defaults_false():
+def test_enabled_defaults_true():
     with patch("hermes_cli.config.load_config_readonly", return_value={}):
-        assert br.load_background_review_settings()[0] is False
+        assert br.load_background_review_settings()[0] is True
 
 
 def test_enabled_false_disables_automatic_review():

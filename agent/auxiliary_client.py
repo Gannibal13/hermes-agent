@@ -31,9 +31,6 @@ from agent.codex_headers import (
     is_official_codex_base_url as _is_official_codex_base_url,
 )
 from agent.codex_runtime import _codex_event_has_content
-from agent.wire_request_budget import (
-    WireRequestBudget, execute_scoped_wire_request, execute_scoped_wire_request_async, wire_request_budget_scope,
-)
 
 # `openai.OpenAI` is imported lazily (~240 ms cold); `OpenAI` below is a proxy
 # so in-module calls, `auxiliary_client.OpenAI` reads and
@@ -6407,23 +6404,16 @@ def _create_with_progress_once(
     ``force_stream``, where a stream-only provider rejects the plain call by definition, so the original
     error is surfaced to the normal recovery chains instead.
     """
-    from agent.wire_request_budget import execute_scoped_wire_request
-
     _notify_aux_dispatch()
     _notify_aux_progress()  # Preserve the watchdog's historical dispatch tick.
     if (not _aux_progress_active() and not force_stream) or _client_streams_internally(client):
-        response = execute_scoped_wire_request(
-            lambda: client.chat.completions.create(**kwargs), key_suffix=task or "auxiliary"
-        )
+        response = client.chat.completions.create(**kwargs)
         if not _client_streams_internally(client):
             _notify_aux_provider_response()
         return response
     stream_kwargs, model, total_ceiling = _stream_request_plan(kwargs)
     try:
-        chunks = execute_scoped_wire_request(
-            lambda: client.chat.completions.create(**stream_kwargs),
-            key_suffix=task or "auxiliary-stream", hold_until_close=True,
-        )
+        chunks = client.chat.completions.create(**stream_kwargs)
     except Exception as exc:
         # Genuine provider failures aren't streaming's fault — surface unchanged so the
         # recovery chains see the same error as a plain call.
@@ -6435,9 +6425,7 @@ def _create_with_progress_once(
         logger.debug("Auxiliary %s: streamed request failed (%s); retrying non-streaming",
                      task or "call", exc)
         _notify_aux_dispatch()
-        response = execute_scoped_wire_request(
-            lambda: client.chat.completions.create(**kwargs), key_suffix=task or "auxiliary-fallback"
-        )
+        response = client.chat.completions.create(**kwargs)
         _notify_aux_provider_response()
         return response
     # Some shims (MoA quiet mode, defensive adapters) return a complete response despite
@@ -6623,10 +6611,7 @@ async def _aggregate_chat_stream_async(
 async def _acreate_with_stream(client: Any, kwargs: Dict[str, Any], task: Optional[str] = None) -> Any:
     """Async create() for stream-only providers: ``stream=True`` + aggregate the async chunks."""
     stream_kwargs, model, total_ceiling = _stream_request_plan(kwargs)
-    chunks = await execute_scoped_wire_request_async(
-        lambda: client.chat.completions.create(**stream_kwargs),
-        key_suffix=task or "auxiliary-stream", hold_until_close=True,
-    )
+    chunks = await client.chat.completions.create(**stream_kwargs)
     if hasattr(chunks, "choices"):  # shims may hand back a complete response despite stream=True
         return chunks
     return await _aggregate_chat_stream_async(chunks, model=model, total_ceiling=total_ceiling)
@@ -6645,18 +6630,13 @@ async def _acreate_with_progress(
     _notify_aux_dispatch()
     _notify_aux_progress()
     if (not _aux_progress_active() and not force_stream) or _async_client_streams_internally(client):
-        response = await execute_scoped_wire_request_async(
-            lambda: client.chat.completions.create(**kwargs), key_suffix=task or "auxiliary"
-        )
+        response = await client.chat.completions.create(**kwargs)
         if not _async_client_streams_internally(client):
             _notify_aux_provider_response()
         return response
     stream_kwargs, model, total_ceiling = _stream_request_plan(kwargs)
     try:
-        chunks = await execute_scoped_wire_request_async(
-            lambda: client.chat.completions.create(**stream_kwargs),
-            key_suffix=task or "auxiliary-stream", hold_until_close=True,
-        )
+        chunks = await client.chat.completions.create(**stream_kwargs)
     except Exception as exc:
         # Only a rejected stream NEGOTIATION falls back to a plain call (mirrors the sync wrapper); a
         # failure mid-consumption below reaches the classified recovery ladder instead of silently
@@ -6667,9 +6647,7 @@ async def _acreate_with_progress(
         logger.debug("Auxiliary %s: streamed async request failed (%s); retrying non-streaming",
                      task or "call", exc)
         _notify_aux_dispatch()
-        response = await execute_scoped_wire_request_async(
-            lambda: client.chat.completions.create(**kwargs), key_suffix=task or "auxiliary-fallback"
-        )
+        response = await client.chat.completions.create(**kwargs)
         _notify_aux_provider_response()
         return response
     if hasattr(chunks, "choices"):  # shims may hand back a complete response despite stream=True
@@ -7201,26 +7179,6 @@ def _stamp_latency_once(latency_info: Optional[Dict[str, int]], key: str, starte
         latency_info[key] = _elapsed_ms(started_at)
 
 
-_AUXILIARY_MAX_PHYSICAL_REQUESTS_DEFAULT = 8
-
-
-def _auxiliary_wire_request_limit() -> int:
-    """Resolve a small bounded physical-attempt cap for one auxiliary logical call."""
-    raw: Any = _AUXILIARY_MAX_PHYSICAL_REQUESTS_DEFAULT
-    try:
-        from hermes_cli.config import load_config_readonly
-        raw = (load_config_readonly().get("auxiliary", {}) or {}).get(
-            "max_physical_requests", raw
-        )
-    except Exception:
-        pass
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        value = _AUXILIARY_MAX_PHYSICAL_REQUESTS_DEFAULT
-    return max(1, min(value, 128))
-
-
 @_relay_auxiliary_call
 def call_llm(
     task: str = None, *, provider: str = None, model: str = None, base_url: str = None,
@@ -7251,9 +7209,6 @@ def call_llm(
                 _stamp_latency_once, latency_info, "provider_dispatch_ms", request_started_at)),
             _aux_thread_local_hook(_aux_provider_response, functools.partial(
                 _stamp_latency_once, latency_info, "time_to_first_progress_ms", request_started_at)),
-            wire_request_budget_scope(
-                WireRequestBudget(_auxiliary_wire_request_limit()), f"auxiliary/{task or 'call'}"
-            ),
         ):
             response = _call_llm_impl(
                 task=task, provider=provider, model=model, base_url=base_url, api_key=api_key,
@@ -7536,18 +7491,16 @@ async def async_call_llm(
     semaphore = _acquire_async_aux_semaphore(task)
     if semaphore is not None:
         await semaphore.acquire()
-    budget = WireRequestBudget(_auxiliary_wire_request_limit())
-    with wire_request_budget_scope(budget, f"auxiliary/{task or 'call'}"):
-        try:
-            return await _async_call_llm_impl(
-                task=task, provider=provider, model=model, base_url=base_url, api_key=api_key,
-                main_runtime=main_runtime, messages=messages, temperature=temperature,
-                max_tokens=max_tokens, tools=tools, timeout=timeout, extra_body=extra_body,
-                reasoning_config=reasoning_config, route_info=route_info,
-            )
-        finally:
-            if semaphore is not None:
-                semaphore.release()
+    try:
+        return await _async_call_llm_impl(
+            task=task, provider=provider, model=model, base_url=base_url, api_key=api_key,
+            main_runtime=main_runtime, messages=messages, temperature=temperature,
+            max_tokens=max_tokens, tools=tools, timeout=timeout, extra_body=extra_body,
+            reasoning_config=reasoning_config, route_info=route_info,
+        )
+    finally:
+        if semaphore is not None:
+            semaphore.release()
 
 
 async def _async_call_llm_impl(
