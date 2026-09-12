@@ -15,7 +15,10 @@ from hermes_constants import get_config_path, get_skills_dir, is_termux
 
 logger = logging.getLogger(__name__)
 
-_SKILL_METADATA_CACHE: Dict[Tuple[str, str, Optional[int]], Tuple[Dict[str, Any], str]] = {}
+_SKILL_METADATA_CACHE: Dict[
+    Tuple[str, Optional[int]],
+    Tuple[int, int, Tuple[Dict[str, Any], str]],
+] = {}
 _SKILL_METADATA_CACHE_LOCK = threading.Lock()
 
 PLATFORM_MAP = {"macos": "darwin", "linux": "linux", "windows": "win32"}
@@ -159,22 +162,24 @@ def clear_skill_metadata_cache() -> None:
 
 
 def load_skill_metadata(skill_file: Path, *, max_chars: Optional[int] = None) -> Tuple[Dict[str, Any], str]:
-    """Read and parse a skill file once per content fingerprint and requested prefix size."""
+    """Read and parse a skill file once per unchanged stat signature and prefix size."""
     path = Path(skill_file)
     try:
-        path.stat()
+        stat = path.stat()
     except OSError:
         return {}, ""
-    text = path.read_text(encoding="utf-8")
-    fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    key = (str(path.resolve()), fingerprint, max_chars)
+    key = (str(path.resolve()), max_chars)
     with _SKILL_METADATA_CACHE_LOCK:
         cached = _SKILL_METADATA_CACHE.get(key)
-    if cached is not None:
-        return dict(cached[0]), cached[1]
+    signature = (stat.st_mtime_ns, stat.st_size)
+    if cached is not None and cached[:2] == signature:
+        result = cached[2]
+        return dict(result[0]), result[1]
+
+    text = path.read_text(encoding="utf-8")
     result = parse_frontmatter(text if max_chars is None else text[:max_chars])
     with _SKILL_METADATA_CACHE_LOCK:
-        _SKILL_METADATA_CACHE[key] = result
+        _SKILL_METADATA_CACHE[key] = (signature[0], signature[1], result)
     return dict(result[0]), result[1]
 
 

@@ -11,7 +11,7 @@ import logging
 
 import pytest
 
-from agent.tool_executor import _commit_tool_result
+from agent.tool_executor import _commit_tool_result, _finalize_tool_batch
 from tools.tool_result_storage import ToolResultPersistenceError
 
 
@@ -108,3 +108,23 @@ def test_normal_persistence_path_unchanged(monkeypatch):
     persisted, display, risk = committed
     assert persisted.startswith("<persisted-output>")
     assert "[STORAGE FAILURE]" not in persisted
+
+
+def test_batch_budget_storage_failure_is_fail_visible_and_does_not_escape(monkeypatch):
+    agent = _StubAgent()
+    agent._apply_pending_steer_to_tool_results = lambda messages, num_tools: None
+    messages = [
+        {"role": "tool", "tool_call_id": "tc_batch", "content": "Z" * 15_000},
+    ]
+
+    def _boom(**kwargs):
+        raise ToolResultPersistenceError("storage unavailable")
+
+    monkeypatch.setattr("agent.tool_executor.get_active_env", lambda task_id: None)
+    monkeypatch.setattr("tools.tool_result_storage.maybe_persist_tool_result", _boom)
+
+    _finalize_tool_batch(agent, messages, "task", 1, _StubBudget())
+
+    assert "[STORAGE FAILURE]" in messages[0]["content"]
+    assert len(messages[0]["content"]) < 1_000
+    assert messages[0]["content"].count("Z") <= _StubBudget.preview_size

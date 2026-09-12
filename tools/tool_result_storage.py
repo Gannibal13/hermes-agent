@@ -155,6 +155,18 @@ def generate_preview(content: str, max_chars: int = DEFAULT_PREVIEW_SIZE_CHARS) 
     return content[:last_nl + 1 if last_nl > max_chars // 2 else max_chars], True
 
 
+def _storage_failure_preview(content: str, config: BudgetConfig) -> str:
+    preview, has_more = generate_preview(content, max_chars=config.preview_size)
+    return (
+        "[STORAGE FAILURE] The full tool output could not be saved to durable "
+        "storage (disk/permission error). The content below is a bounded preview; "
+        "it is NOT recoverable later. Treat the tool result as partial and avoid "
+        "re-requesting oversized payloads.\n"
+        + preview
+        + ("\n..." if has_more else "")
+    )
+
+
 def _write_to_sandbox(content: str, remote_path: str, env) -> bool:
     """Write content into the sandbox via env.execute(); True on success. Content goes through
     stdin, not the command string: Linux ``MAX_ARG_STRLEN`` caps one argv element at 128 KB,
@@ -248,9 +260,16 @@ def enforce_turn_budget(tool_messages: list[dict], env=None,
             break
         content = tool_messages[idx]["content"]
         tool_use_id = tool_messages[idx].get("tool_call_id", f"budget_{idx}")
-        replacement = maybe_persist_tool_result(
-            content=content, tool_name=_BUDGET_TOOL_NAME, tool_use_id=tool_use_id,
-            env=env, config=config, threshold=0)
+        try:
+            replacement = maybe_persist_tool_result(
+                content=content, tool_name=_BUDGET_TOOL_NAME, tool_use_id=tool_use_id,
+                env=env, config=config, threshold=0)
+        except ToolResultPersistenceError as exc:
+            logger.error(
+                "TOOL RESULT STORAGE FAILURE during budget enforcement for %s: %s",
+                tool_use_id, exc,
+            )
+            replacement = _storage_failure_preview(content, config)
         if replacement != content:
             total_size += len(replacement) - size
             tool_messages[idx]["content"] = replacement
