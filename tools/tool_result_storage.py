@@ -29,6 +29,10 @@ _spillover_prune_lock = threading.Lock()
 _spillover_pruned_once = False
 
 
+class ToolResultPersistenceError(RuntimeError):
+    """A large live result could not be durably saved."""
+
+
 def get_spillover_dir():
     """Return $HERMES_HOME/cache/spillover as a Path (not created)."""
     from hermes_constants import get_hermes_home
@@ -224,10 +228,9 @@ def maybe_persist_tool_result(content: str, tool_name: str, tool_use_id: str, en
                 return _persisted(remote_path)
         except Exception as exc:
             logger.warning("Sandbox write failed for %s: %s", tool_use_id, exc)
-    logger.info("Inline-truncating large tool result: %s (%d chars, no sandbox write)",
-                tool_name, len(content))
-    return (f"{preview}\n\n[Truncated: tool response was {len(content):,} chars. "
-            "Full output could not be saved to sandbox.]")
+    raise ToolResultPersistenceError(
+        f"Could not durably save large tool result {tool_use_id!r}; refusing lossy fallback"
+    )
 
 
 def enforce_turn_budget(tool_messages: list[dict], env=None,

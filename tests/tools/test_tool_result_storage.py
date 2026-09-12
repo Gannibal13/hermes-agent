@@ -406,19 +406,15 @@ class TestSpillover:
         # Host canonical copy exists regardless.
         assert (get_spillover_dir() / "tc_remote_2.txt").exists()
 
-    def test_spillover_write_failure_falls_back_to_inline(self, monkeypatch):
+    def test_spillover_write_failure_is_fail_closed(self, monkeypatch):
         import tools.tool_result_storage as trs
         monkeypatch.setattr(trs, "_write_to_spillover", lambda *a, **k: None)
         content = "w" * 60_000
-        result = maybe_persist_tool_result(
-            content=content,
-            tool_name="tool_call",
-            tool_use_id="tc_fail_1",
-            env=None,
-            threshold=30_000,
-        )
-        assert "could not be saved" in result
-        assert PERSISTED_OUTPUT_TAG not in result
+        with pytest.raises(RuntimeError, match="durably save|lossy"):
+            maybe_persist_tool_result(
+                content=content, tool_name="tool_call", tool_use_id="tc_fail_1",
+                env=None, threshold=30_000,
+            )
 
     def test_cleanup_spillover_cache_removes_old_keeps_new(self):
         import os
