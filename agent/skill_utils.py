@@ -2,6 +2,7 @@
 Import-light by design: no tool registry, CLI config, or provider resolution."""
 
 import ast
+import hashlib
 import logging
 import os
 import re
@@ -14,7 +15,7 @@ from hermes_constants import get_config_path, get_skills_dir, is_termux
 
 logger = logging.getLogger(__name__)
 
-_SKILL_METADATA_CACHE: Dict[Tuple[str, Tuple[int, int], Optional[int]], Tuple[Dict[str, Any], str]] = {}
+_SKILL_METADATA_CACHE: Dict[Tuple[str, str, Optional[int]], Tuple[Dict[str, Any], str]] = {}
 _SKILL_METADATA_CACHE_LOCK = threading.Lock()
 
 PLATFORM_MAP = {"macos": "darwin", "linux": "linux", "windows": "win32"}
@@ -158,20 +159,20 @@ def clear_skill_metadata_cache() -> None:
 
 
 def load_skill_metadata(skill_file: Path, *, max_chars: Optional[int] = None) -> Tuple[Dict[str, Any], str]:
-    """Read and parse a skill file once per stat fingerprint and requested prefix size."""
+    """Read and parse a skill file once per content fingerprint and requested prefix size."""
     path = Path(skill_file)
     try:
-        stat = path.stat()
-        fingerprint = (stat.st_mtime_ns, stat.st_size)
+        path.stat()
     except OSError:
         return {}, ""
+    text = path.read_text(encoding="utf-8")
+    fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
     key = (str(path.resolve()), fingerprint, max_chars)
     with _SKILL_METADATA_CACHE_LOCK:
         cached = _SKILL_METADATA_CACHE.get(key)
     if cached is not None:
         return dict(cached[0]), cached[1]
-    content = path.read_text(encoding="utf-8")
-    result = parse_frontmatter(content if max_chars is None else content[:max_chars])
+    result = parse_frontmatter(text if max_chars is None else text[:max_chars])
     with _SKILL_METADATA_CACHE_LOCK:
         _SKILL_METADATA_CACHE[key] = result
     return dict(result[0]), result[1]
@@ -260,7 +261,7 @@ def skill_matches_environment(frontmatter: Dict[str, Any]) -> bool:
     return any(_detect_environment(tag) for tag in tags if tag)
 
 
-_RAW_CONFIG_CACHE: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
+_RAW_CONFIG_CACHE: Dict[Tuple[str, int, int, str], Dict[str, Any]] = {}
 
 
 def _raw_config_cache_clear() -> None:
@@ -268,11 +269,12 @@ def _raw_config_cache_clear() -> None:
     _RAW_CONFIG_CACHE.clear()
 
 
-def _config_cache_key(config_path: Path) -> Optional[Tuple[str, int, int]]:
-    """``(path, mtime_ns, size)`` identity of config.yaml, or None when unreadable/absent."""
+def _config_cache_key(config_path: Path) -> Optional[Tuple[str, int, int, str]]:
+    """Content-aware identity of config.yaml, or None when unreadable/absent."""
     try:
         stat = config_path.stat()
-        return (str(config_path), stat.st_mtime_ns, stat.st_size)
+        digest = hashlib.sha256(config_path.read_bytes()).hexdigest()
+        return (str(config_path), stat.st_mtime_ns, stat.st_size, digest)
     except OSError:
         return None
 
@@ -368,7 +370,7 @@ def _normalize_string_set(values) -> Set[str]:
 
 # config identity -> resolved external dirs. Called once per skill during
 # banner / tool-registry scans; re-resolving each time dominated cold-start.
-_EXTERNAL_DIRS_CACHE: Dict[Tuple[str, int], List[Path]] = {}
+_EXTERNAL_DIRS_CACHE: Dict[Tuple[str, int, int, str], List[Path]] = {}
 
 
 def _external_dirs_cache_clear() -> None:
@@ -393,7 +395,7 @@ def get_external_skills_dirs() -> List[Path]:
     if not config_path.exists():
         return []
     full_key = _config_cache_key(config_path)
-    cache_key = full_key[:2] if full_key is not None else None
+    cache_key = full_key
     cached = _EXTERNAL_DIRS_CACHE.get(cache_key) if cache_key is not None else None
     if cached is not None:
         return list(cached)  # copy so callers can't mutate the cache

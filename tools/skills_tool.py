@@ -5,6 +5,7 @@ scripts/. `skills_list` returns name/description only; `skill_view` returns full
 linked files. Sibling modules (skills_tool_setup / _plugin / _dedup) re-export here."""
 
 import json
+import hashlib
 import logging
 import os
 import time
@@ -62,7 +63,8 @@ def _skills_scan_signature(dirs_to_scan, disabled) -> tuple:
                 path = Path(root) / filename
                 with suppress(OSError):
                     stat = path.stat()
-                    sig.append((str(path), stat.st_mtime_ns, stat.st_size))
+                    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                    sig.append((str(path), stat.st_mtime_ns, stat.st_size, digest))
     return (tuple(sig), frozenset(disabled), platform)
 
 

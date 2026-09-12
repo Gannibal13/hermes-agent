@@ -492,6 +492,18 @@ def dispatch_tool_describe(args: Dict[str, Any], *, current_tool_defs: List[Dict
     for name in names:
         fn = by_name.get(name)
         remote_fn = remote_schemas.get(name)
+        if fn is not None and not fn.get("parameters"):
+            # Metadata-only deferred definitions intentionally omit the expensive schema.
+            # Materialize exactly the names the model selected, one registry lookup at a time.
+            loaded = _registry_entry(name)
+            if loaded is not None:
+                try:
+                    from tools.registry import registry
+                    selected = registry.get_definitions({name}, quiet=True)
+                    if selected:
+                        fn = _fn(selected[0])
+                except Exception:
+                    pass
         if fn is not None:
             tools[name] = {"description": fn.get("description", ""),
                            "parameters": fn.get("parameters", {})}
