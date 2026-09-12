@@ -37,10 +37,35 @@ import pytest
 # The gateway conftest installs a MagicMock ``telegram`` package when the
 # real library has not been imported yet. This probe exercises the REAL PTB
 # HTTPXRequest against a live socket server, so evict any mock before the
-# real import. The lane installs the messaging extra, so real PTB is present.
-# Gated to win32: on other platforms these tests are skipped and evicting the
-# shared mock here would poison later test modules in the same session.
-if sys.platform == "win32":
+# real import. Gated to win32 AND to the real library actually being
+# installed: evicting the shared mock without a real ``telegram`` package
+# behind it poisons every later telegram test module in the same session
+# (ModuleNotFoundError at collection time) instead of just skipping here.
+
+
+def _real_telegram_installed() -> bool:
+    """True when the real python-telegram-bot package is importable.
+
+    Probed with the mock modules temporarily removed from ``sys.modules`` —
+    ``find_spec`` trusts sys.modules entries, and the mock is a MagicMock
+    with no meaningful ``__spec__``.
+    """
+    saved = {
+        k: v for k, v in sys.modules.items()
+        if k == "telegram" or k.startswith("telegram.")
+    }
+    for k in saved:
+        del sys.modules[k]
+    try:
+        return importlib.util.find_spec("telegram") is not None
+    except Exception:
+        return False
+    finally:
+        sys.modules.update(saved)
+
+
+_REAL_PTB = _real_telegram_installed()
+if sys.platform == "win32" and _REAL_PTB:
     _tg = sys.modules.get("telegram")
     if _tg is not None and not hasattr(_tg, "__file__"):
         for _name in [
@@ -59,6 +84,10 @@ pytestmark = [
     pytest.mark.skipif(
         sys.platform != "win32",
         reason="Windows-only live probe: CLOSE-WAIT reconnect behavior (#87057)",
+    ),
+    pytest.mark.skipif(
+        not _REAL_PTB,
+        reason="real python-telegram-bot not installed; live probe needs it",
     ),
 ]
 

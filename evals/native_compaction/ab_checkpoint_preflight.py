@@ -267,7 +267,12 @@ def main() -> int:
     for name, scenario_result in result.items():
         if not isinstance(scenario_result, dict):
             continue
-        checks.append(bool(scenario_result.get("provider_requests_total", 0)))
+        request_key = (
+            "provider_requests_total"
+            if "provider_requests_total" in scenario_result
+            else "provider_requests_resume"
+        )
+        checks.append(bool(scenario_result.get(request_key, 0)))
         checks.append(bool(scenario_result.get("turn1_completed", True)))
         checks.append(bool(scenario_result.get("turn2_completed", scenario_result.get("resume_completed", True))))
     return 0 if all(checks) else 1
