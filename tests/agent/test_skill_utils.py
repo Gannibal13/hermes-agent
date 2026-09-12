@@ -43,6 +43,49 @@ def test_skill_metadata_cache_reuses_unchanged_file(monkeypatch, tmp_path):
     assert reads == 1
 
 
+def test_skill_metadata_cache_invalidates_on_file_change_and_preserves_max_chars(tmp_path):
+    from agent import skill_utils
+
+    skill_file = tmp_path / "SKILL.md"
+    skill_file.write_text("---\nname: first\n---\nfirst body\n", encoding="utf-8")
+    skill_utils.clear_skill_metadata_cache()
+
+    first, first_body = skill_utils.load_skill_metadata(skill_file, max_chars=25)
+    assert first["name"] == "first"
+    assert first_body == "first"
+
+    skill_file.write_text("---\nname: second\n---\nsecond body\n", encoding="utf-8")
+    changed, changed_body = skill_utils.load_skill_metadata(skill_file, max_chars=None)
+    assert changed["name"] == "second"
+    assert changed_body == "second body\n"
+
+    limited, limited_body = skill_utils.load_skill_metadata(skill_file, max_chars=25)
+    assert limited["name"] == "second"
+    assert limited_body == "seco"
+
+
+def test_clear_skill_metadata_cache_forces_next_read(tmp_path, monkeypatch):
+    from agent import skill_utils
+
+    skill_file = tmp_path / "SKILL.md"
+    skill_file.write_text("---\nname: clearable\n---\nbody\n", encoding="utf-8")
+    skill_utils.clear_skill_metadata_cache()
+    reads = 0
+    real_read = type(skill_file).read_text
+
+    def counted_read(path, *args, **kwargs):
+        nonlocal reads
+        if path == skill_file:
+            reads += 1
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(skill_file), "read_text", counted_read)
+    skill_utils.load_skill_metadata(skill_file)
+    skill_utils.clear_skill_metadata_cache()
+    skill_utils.load_skill_metadata(skill_file)
+    assert reads == 2
+
+
 
 
 
