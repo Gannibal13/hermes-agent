@@ -592,9 +592,19 @@ def _context_files_part(agent: Any, ctx_len: Optional[int], soul_loaded: bool) -
     if agent.skip_context_files:
         return []
     launch_artifact = getattr(agent, "_context_cwd_is_launch_artifact", False)
+    try:
+        from hermes_cli.config import load_config_readonly
+        mode = str((load_config_readonly().get("skills", {}) or {}).get(
+            "project_context_mode", "safe")).strip().lower()
+    except Exception:
+        mode = "safe"
+    if mode not in {"safe", "full", "selective", "opt-in"}:
+        mode = "safe"
+    agents_mode = "selective" if mode == "safe" else mode
     return [_pb.build_context_files_prompt(
         cwd=None if launch_artifact else resolve_context_cwd(), skip_soul=soul_loaded, context_length=ctx_len,
-        allow_install_tree_fallback=agent.platform in ("cli", "tui"), home_override=_agent_home(agent))]
+        allow_install_tree_fallback=agent.platform in ("cli", "tui"), home_override=_agent_home(agent),
+        agents_mode=agents_mode)]
 
 
 def _join_tier(parts: List[Optional[str]]) -> str:

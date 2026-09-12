@@ -43,7 +43,7 @@ def _captured_context_cwd(agent):
 
     def fake_context_files(
         cwd=None, skip_soul=False, context_length=None,
-        allow_install_tree_fallback=False, home_override=None,
+        allow_install_tree_fallback=False, home_override=None, agents_mode="full",
     ):
         captured["cwd"] = cwd
         return ""
@@ -834,4 +834,3 @@ class TestConversationStartedTwoLine:
         vol = self._volatile(agent)
         assert "Conversation started:" not in vol
         assert "as of the last context rebuild" not in vol
-
