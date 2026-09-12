@@ -15,7 +15,7 @@ import time
 from typing import Any, Dict, Optional
 
 from agent.message_metadata import append_message
-from agent.wire_request_budget import WireRequestBudget, execute_bounded_request
+from agent.wire_request_budget import WireRequestBudget, hold_wire_request_lease
 
 logger = logging.getLogger("agent.conversation_loop")
 
@@ -92,41 +92,58 @@ def perform_api_call(
         wire_attempt += 1
         agent._wire_request_attempt = wire_attempt
         request_key = f"{turn_id or 'turn'}/{api_request_id or 'request'}/{wire_attempt}"
+        lease = wire_budget.reserve(request_key)
+        if lease is None:
+            raise RuntimeError("physical provider request budget exhausted")
 
-        def _provider_call():
+        # Route-specific request shaping is pre-provider work. If it fails, no
+        # physical request was sent and the reservation must be returned.
+        try:
+            prepared_kwargs = next_api_kwargs
             if agent.api_mode == "codex_responses":
-                next_api_kwargs = agent._get_transport().preflight_kwargs(
+                prepared_kwargs = agent._get_transport().preflight_kwargs(
                     next_api_kwargs, allow_stream=False, is_github_responses=agent._is_copilot_url(),
                     sanitize_harmony_tokens=agent._is_codex_backend(),
                 )
+        except BaseException:
+            wire_budget.refund(lease)
+            raise
+
+        try:
             if _use_streaming:
-                return agent._interruptible_streaming_api_call(
-                    next_api_kwargs, on_first_delta=_stop_spinner
+                result = agent._interruptible_streaming_api_call(
+                    prepared_kwargs, on_first_delta=_stop_spinner
                 )
-            from agent import relay_llm
+            else:
+                from agent import relay_llm
 
-            return relay_llm.execute(
-                next_api_kwargs,
-                agent._interruptible_api_call,
-                session_id=str(agent.session_id or ""),
-                name=str(agent.provider or "provider"),
-                model_name=str(agent.model or ""),
-                metadata={
-                    "api_mode": agent.api_mode,
-                    "api_request_id": api_request_id,
-                    "call_role": (
-                        "delegated" if getattr(agent, "is_subagent", False)
-                        else "fallback" if int(getattr(agent, "_fallback_index", 0) or 0) > 0
-                        else "primary"
-                    ),
-                    "retry_count": retry_count,
-                },
-                defer_logical_completion=True,
-            )
-
-        return execute_bounded_request(
-            wire_budget, request_key, _provider_call, refund_on_error=False
-        )
+                result = relay_llm.execute(
+                    prepared_kwargs,
+                    agent._interruptible_api_call,
+                    session_id=str(agent.session_id or ""),
+                    name=str(agent.provider or "provider"),
+                    model_name=str(agent.model or ""),
+                    metadata={
+                        "api_mode": agent.api_mode,
+                        "api_request_id": api_request_id,
+                        "call_role": (
+                            "delegated" if getattr(agent, "is_subagent", False)
+                            else "fallback" if int(getattr(agent, "_fallback_index", 0) or 0) > 0
+                            else "primary"
+                        ),
+                        "retry_count": retry_count,
+                    },
+                    defer_logical_completion=True,
+                )
+        except BaseException:
+            # Once the provider callback was entered this was a physical attempt,
+            # including a transport error or an interrupted request.
+            wire_budget.commit(lease)
+            raise
+        if _use_streaming:
+            return hold_wire_request_lease(result, wire_budget, lease)
+        wire_budget.commit(lease)
+        return result
 
     from hermes_cli.middleware import run_llm_execution_middleware
 

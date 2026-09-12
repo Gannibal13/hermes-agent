@@ -585,8 +585,27 @@ def _stage_turn_user_message(
     return user_msg, pending_cli_message
 
 
+def _hydrate_active_task_state(agent: Any) -> None:
+    """Restore the canonical human task before transcript-derived resume heuristics."""
+    if getattr(agent, "_active_task_source", None) is not None:
+        return
+    session_db = getattr(agent, "_session_db", None)
+    session_id = getattr(agent, "session_id", None)
+    getter = getattr(session_db, "get_active_task", None)
+    if not callable(getter) or not session_id:
+        return
+    try:
+        task = getter(session_id)
+    except Exception:
+        logger.debug("active task hydration skipped", exc_info=True)
+        return
+    if task is not None:
+        agent._active_task_source = task
+
+
 def _hydrate_from_history(agent: Any, conversation_history: Optional[List[Any]]) -> None:
     """Hydrate process-local state from persisted history on the first resumed turn."""
+    _hydrate_active_task_state(agent)
     if not conversation_history:
         return
     if not agent._todo_store.has_items():

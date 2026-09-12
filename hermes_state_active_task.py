@@ -24,6 +24,27 @@ class SessionActiveTaskMixin:
         return ActiveTaskSource(row["text"], row["row_id"], row["task_id"], row["turn_id"],
                                 row["content_hash"], row["provenance"], row["status"], row["revision"])
 
+    def _copy_active_task_to_session(self, conn, source_session_id: str, target_session_id: str) -> None:
+        """Copy the canonical task row during an atomic session handoff."""
+        self._ensure_active_task_table(conn)
+        row = conn.execute(
+            "SELECT text,row_id,task_id,turn_id,content_hash,provenance,status,revision "
+            "FROM active_tasks WHERE session_id = ?",
+            (source_session_id,),
+        ).fetchone()
+        if row is None:
+            return
+        conn.execute(
+            """INSERT INTO active_tasks
+                (session_id,text,row_id,task_id,turn_id,content_hash,provenance,status,revision)
+                VALUES (?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(session_id) DO UPDATE SET text=excluded.text,row_id=excluded.row_id,
+                task_id=excluded.task_id,turn_id=excluded.turn_id,content_hash=excluded.content_hash,
+                provenance=excluded.provenance,status=excluded.status,revision=excluded.revision""",
+            (target_session_id, row["text"], row["row_id"], row["task_id"], row["turn_id"],
+             row["content_hash"], row["provenance"], row["status"], row["revision"]),
+        )
+
     def set_active_task(self, session_id: str, text: str, *, row_id=None, task_id=None,
                         turn_id=None, provenance: str = "human") -> ActiveTaskSource:
         task = ActiveTaskSource.create(text, row_id=row_id, task_id=task_id, turn_id=turn_id,
@@ -77,8 +98,11 @@ class SessionActiveTaskMixin:
                              expected_revision: int) -> Optional[ActiveTaskSource]:
         def _do(conn):
             self._ensure_active_task_table(conn)
-            conn.execute("UPDATE active_tasks SET row_id=?,turn_id=?,revision=revision+1 "
-                         "WHERE session_id=? AND revision=?", (row_id, turn_id, session_id, expected_revision))
+            updated = conn.execute("UPDATE active_tasks SET row_id=?,turn_id=?,revision=revision+1 "
+                                   "WHERE session_id=? AND revision=?",
+                                   (row_id, turn_id, session_id, expected_revision))
+            if updated.rowcount != 1:
+                return None
             row = conn.execute("SELECT text,row_id,task_id,turn_id,content_hash,provenance,status,revision "
                                "FROM active_tasks WHERE session_id=?", (session_id,)).fetchone()
             return None if row is None else self._active_task(row)

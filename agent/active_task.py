@@ -27,6 +27,10 @@ class ActiveTaskSource:
                provenance: str = "human", status: str = "active", revision: int = 0):
         if not isinstance(text, str) or not text:
             raise ValueError("active task text must be non-empty human text")
+        if provenance not in {"human", "goal"}:
+            raise ValueError("active task provenance must be human or goal")
+        if status not in {"active", "completed", "cancelled"}:
+            raise ValueError("invalid active task status")
         return cls(text, row_id, task_id, turn_id, cls.hash_text(text), provenance, status, revision)
 
 

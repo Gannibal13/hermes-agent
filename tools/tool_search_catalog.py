@@ -11,7 +11,10 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-import snowballstemmer
+try:
+    import snowballstemmer
+except ImportError:  # minimal embedded/runtime installs may omit optional stemming support
+    snowballstemmer = None
 
 # Reserved bridge names: a user/plugin/MCP tool may not take them (registry override
 # protection rejects such registrations).
@@ -46,6 +49,8 @@ def _stem(token: str) -> str:
     mutable parsing state and bridge dispatch runs on parallel tool-call threads, so the
     stemmer is one-per-thread, created lazily."""
     if getattr(_thread_local, "stemmer", None) is None:
+        if snowballstemmer is None:
+            return token.lower()
         _thread_local.stemmer = snowballstemmer.stemmer("english")
     return _thread_local.stemmer.stemWord(token)
 

@@ -746,10 +746,10 @@ class AIAgent(
         (/refine) is never deferred but does not touch the ``focus``-keyed delegate/enabled gates.
         """
         # Gates run at enqueue/spawn time; the idle dispatcher re-checks `enabled` at dispatch time.
-        if focus is None and getattr(self, "_delegate_depth", 0) > 0:
+        if focus is None and not explicit and getattr(self, "_delegate_depth", 0) > 0:
             return
         task_cfg = None
-        if focus is None:
+        if focus is None and not explicit:
             from agent.background_review import load_background_review_settings
             enabled, task_cfg = load_background_review_settings()
             if not enabled:

@@ -1376,7 +1376,7 @@ def _build_skills_system_prompt_inner(
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())),
         index_mode,
-        _skills_manifest_key(skills_dir),
+        tuple(_skills_manifest_key(directory) for directory in (skills_dir, *external_dirs, *project_dirs)),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1566,6 +1566,9 @@ def _load_agents_md(
         return ""
     cwd_resolved = cwd_path.resolve()
     if mode == "selective":
+        git_root = _find_git_root(cwd_resolved)
+        if git_root is not None and git_root.resolve() == cwd_resolved:
+            return ""
         for name in ("AGENTS.override.md", "AGENTS.md", "agents.md"):
             candidate = cwd_resolved / name
             content = _read_context_file(candidate)

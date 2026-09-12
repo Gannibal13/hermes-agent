@@ -582,7 +582,10 @@ from typing import Literal  # noqa: F401,E402
 import copy  # noqa: F401,E402
 from dataclasses import field  # noqa: F401,E402
 import re  # noqa: F401,E402
-import snowballstemmer  # noqa: F401,E402
+try:
+    import snowballstemmer  # noqa: F401,E402
+except ImportError:
+    snowballstemmer = None  # noqa: F401,E402
 import threading  # noqa: F401,E402
 
 def build_catalog_listing(
