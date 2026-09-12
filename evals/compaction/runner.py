@@ -287,6 +287,10 @@ def run_policy(name: str, spec: dict, messages, questions, out_dir: Path,
         "recall_pct": round(100 * sum(scored) / (2 * len(scored)), 1) if scored else 0.0,
         "scores": scored,
         "summary_error": getattr(comp, "_last_summary_error", None),
+        "assertions_failed": sum(
+            not isinstance(r.get("score"), int) or r.get("score") not in (0, 1, 2)
+            for r in results
+        ) + (1 if not questions else 0),
     }
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / f"{label.replace('+', '_')}.json").write_text(json.dumps({"summary": summary, "results": results}, indent=1), encoding="utf-8")
@@ -350,7 +354,8 @@ def main():
 
     (out_dir / "scorecard.json").write_text(json.dumps(summaries, indent=1), encoding="utf-8")
     print(f"\nscorecard -> {out_dir}/scorecard.json")
+    return 1 if any(s.get("assertions_failed", 0) or s.get("summary_error") for s in summaries) else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

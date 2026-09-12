@@ -587,6 +587,13 @@ def _stage_turn_user_message(
 
 def _hydrate_from_history(agent: Any, conversation_history: Optional[List[Any]]) -> None:
     """Hydrate process-local state from persisted history on the first resumed turn."""
+    if agent._user_turn_count == 0:
+        get_active_task = getattr(getattr(agent, "_session_db", None), "get_active_task", None)
+        if callable(get_active_task):
+            with suppress(Exception):
+                hydrated = get_active_task(agent.session_id)
+                if hydrated is not None:
+                    agent._active_task_source = hydrated
     if not conversation_history:
         return
     if not agent._todo_store.has_items():

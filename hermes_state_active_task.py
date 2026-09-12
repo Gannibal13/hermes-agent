@@ -55,17 +55,17 @@ class SessionActiveTaskMixin:
                 ORDER BY l.depth LIMIT 1""", (session_id,))
         except sqlite3.OperationalError:
             return None
-        return None if row is None else self._active_task(row)
+        # A nearest-session terminal row is a tombstone: it explicitly shadows an
+        # inherited parent task and prevents resurrection after child completion.
+        return None if row is None or row["status"] != "active" else self._active_task(row)
 
     def complete_active_task(self, session_id: str, text: str, *, expected_revision: int) -> bool:
         digest = ActiveTaskSource.hash_text(text)
         def _do(conn):
             self._ensure_active_task_table(conn)
-            cur = conn.execute("""WITH RECURSIVE lineage(id) AS (
-                SELECT ? UNION ALL SELECT s.parent_session_id FROM sessions s JOIN lineage ON s.id = lineage.id
-                WHERE s.parent_session_id IS NOT NULL
-            ) DELETE FROM active_tasks WHERE session_id IN (SELECT id FROM lineage)
-                AND revision = ? AND provenance = 'human' AND content_hash = ?""",
+            cur = conn.execute("""UPDATE active_tasks
+                SET status = 'completed', revision = revision + 1
+                WHERE session_id = ? AND revision = ? AND provenance = 'human' AND content_hash = ?""",
                 (session_id, expected_revision, digest))
             changed = cur.rowcount
             if changed is None or changed < 0:

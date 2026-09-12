@@ -12,6 +12,11 @@ from pathlib import Path
 def main():
     out_dir = Path(sys.argv[1])
     card = json.loads((out_dir / "scorecard.json").read_text(encoding="utf-8"))
+    invalid = [
+        s for s in card
+        if s.get("assertions_failed", 0) or s.get("summary_error")
+        or ("provider_requests_total" in s and not s["provider_requests_total"])
+    ]
     card.sort(key=lambda s: -s["recall_pct"])
 
     rows = []
@@ -37,7 +42,8 @@ def main():
         md.append("| " + " | ".join(r) + " |")
     (out_dir / "scorecard.md").write_text("\n".join(md) + "\n", encoding="utf-8")
     print(f"\nmarkdown -> {out_dir}/scorecard.md")
+    return 1 if invalid else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
