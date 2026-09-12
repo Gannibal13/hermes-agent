@@ -48,6 +48,7 @@ from agent.tool_dispatch_helpers import (
 from tools.terminal_tool_lifecycle import get_active_env
 from tools.thread_context import propagate_context_to_thread
 from tools.tool_result_storage import (
+    generate_preview,
     maybe_persist_tool_result,
     enforce_turn_budget,
     extract_persisted_path,
@@ -55,6 +56,12 @@ from tools.tool_result_storage import (
 from tools.budget_config import BudgetConfig, DEFAULT_BUDGET, budget_for_context_window
 
 logger = logging.getLogger(__name__)
+
+
+def _live_tool_preview(result: Any, limit: int = 1_500) -> str:
+    """Keep live UI/event payloads bounded; the committed tool message owns durability."""
+    preview, has_more = generate_preview(result if isinstance(result, str) else str(result), limit)
+    return preview + ("\n..." if has_more else "")
 
 
 _pairing_tool_call_id = coalesce_tool_call_id  # canonical id used by the persisted assistant message
@@ -951,7 +958,10 @@ def _emit_tool_complete_and_risk(agent, ref: _ToolCallRef, result, risk_metadata
         except Exception as cb_err:
             logging.debug("Tool complete callback error: %s", cb_err)
         else:
-            _safe_callback(agent.tool_complete_callback, "Tool complete", ref.call_id, ref.name, display_args, result)
+            _safe_callback(
+                agent.tool_complete_callback, "Tool complete", ref.call_id, ref.name,
+                display_args, _live_tool_preview(result),
+            )
     if risk_metadata is not None and risk_metadata.get("risk") != "low":
         _safe_callback(
             agent.tool_progress_callback, "Tool output risk",
@@ -1039,7 +1049,8 @@ def _commit_tool_result(
         # reconstruct the result even if the UI bridge dies mid-projection.
         _safe_callback(
             agent.tool_progress_callback, "Tool progress",
-            "tool.completed", function_name, None, None, duration=tool_duration, is_error=is_error, result=function_result,
+            "tool.completed", function_name, None, None, duration=tool_duration, is_error=is_error,
+            result=_live_tool_preview(function_result),
         )
     return persisted_result, function_result, tool_message.get("_tool_output_risk")
 

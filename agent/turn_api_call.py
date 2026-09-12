@@ -94,19 +94,20 @@ def perform_api_call(
         request_key = f"{turn_id or 'turn'}/{api_request_id or 'request'}/{wire_attempt}"
 
         def _provider_call():
+            provider_kwargs = next_api_kwargs
             if agent.api_mode == "codex_responses":
-                next_api_kwargs = agent._get_transport().preflight_kwargs(
-                    next_api_kwargs, allow_stream=False, is_github_responses=agent._is_copilot_url(),
+                provider_kwargs = agent._get_transport().preflight_kwargs(
+                    provider_kwargs, allow_stream=False, is_github_responses=agent._is_copilot_url(),
                     sanitize_harmony_tokens=agent._is_codex_backend(),
                 )
             if _use_streaming:
                 return agent._interruptible_streaming_api_call(
-                    next_api_kwargs, on_first_delta=_stop_spinner
+                    provider_kwargs, on_first_delta=_stop_spinner
                 )
             from agent import relay_llm
 
             return relay_llm.execute(
-                next_api_kwargs,
+                provider_kwargs,
                 agent._interruptible_api_call,
                 session_id=str(agent.session_id or ""),
                 name=str(agent.provider or "provider"),
