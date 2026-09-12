@@ -579,23 +579,30 @@ def get_untrusted_project_skills_root() -> Optional[Tuple[Path, int]]:
 # high-confidence findings only. The scan cache lives under HERMES_HOME, never inside the repo (we don't
 # write artifacts into the user's checkout).
 _PROJECT_SCAN_SOURCE = "project-local"
-_PROJECT_QUARANTINE_CACHE: Dict[str, bool] = {}  # skill_dir -> quarantined
+_PROJECT_QUARANTINE_CACHE: Dict[Tuple[str, str], bool] = {}  # (skill_dir, content_hash) -> quarantined
 
 
 def is_quarantined_project_skill(skill_md) -> bool:
     """True when a project skill's scan verdict is ``dangerous``. Fail-closed: a
-    scanner crash or missing scanner quarantines the skill. Scans
-    unconditionally — non-project callers should not call this."""
+    scanner crash or missing scanner quarantines the skill. The in-process cache
+    is content-keyed so edits cannot reuse an old verdict."""
     skill_dir = Path(skill_md).parent
     try:
         key = str(skill_dir.resolve())
     except OSError:
         key = str(skill_dir)
-    if key in _PROJECT_QUARANTINE_CACHE:
-        return _PROJECT_QUARANTINE_CACHE[key]
     try:
-        from tools.skills_guard import scan_skill_cached
+        from tools.skills_guard import content_hash, scan_skill_cached
         from hermes_constants import get_hermes_home
+        digest = content_hash(skill_dir)
+    except Exception:
+        logger.warning("Project skill scan preparation failed — quarantining (fail closed): %s", skill_dir,
+                       exc_info=True)
+        return True
+    cache_key = (key, digest)
+    if cache_key in _PROJECT_QUARANTINE_CACHE:
+        return _PROJECT_QUARANTINE_CACHE[cache_key]
+    try:
         cache_dir = get_hermes_home() / "cache" / "project_skill_scans"
         result, _prov = scan_skill_cached(skill_dir, source=_PROJECT_SCAN_SOURCE, cache_dir=cache_dir)
         quarantined = result.verdict == "dangerous"
@@ -604,7 +611,12 @@ def is_quarantined_project_skill(skill_md) -> bool:
     except Exception:
         logger.warning("Project skill scan failed — quarantining (fail closed): %s", skill_dir, exc_info=True)
         quarantined = True
-    _PROJECT_QUARANTINE_CACHE[key] = quarantined
+    # Keep only the current content verdict for this directory; edits must trigger
+    # a fresh scan without growing this process-local cache indefinitely.
+    for stale_key in tuple(_PROJECT_QUARANTINE_CACHE):
+        if stale_key[0] == key and stale_key != cache_key:
+            _PROJECT_QUARANTINE_CACHE.pop(stale_key, None)
+    _PROJECT_QUARANTINE_CACHE[cache_key] = quarantined
     return quarantined
 
 
