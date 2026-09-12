@@ -23,6 +23,7 @@ from agent.runtime_cwd import resolve_agent_cwd
 from agent.skill_utils import (
     EXCLUDED_SKILL_DIRS, ORG_ACTIVE_MARKER, ORG_MIRROR_DIR_NAME, ORG_PROVENANCE_FILE, SKILL_SUPPORT_DIRS,
     extract_skill_conditions, extract_skill_description, get_all_skills_dirs, get_disabled_skill_names,
+    load_skill_metadata,
     iter_skill_index_files, parse_frontmatter, read_active_org_id, skill_matches_environment,
     skill_matches_platform, skill_matches_platform_list,
 )
@@ -1117,6 +1118,17 @@ def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
     return manifest
 
 
+def _skills_manifest_key(skills_dir: Path) -> tuple:
+    """Stat-only cache key for skill metadata files.
+
+    The prompt cache is process-local, so checking only its arguments is not enough:
+    an in-place SKILL.md edit must invalidate an already rendered index.  Keep this
+    check metadata-only; parsing remains on the cache miss path.
+    """
+    manifest = _build_skills_manifest(skills_dir)
+    return tuple(sorted((path, *values) for path, values in manifest.items()))
+
+
 def _load_skills_snapshot(skills_dir: Path) -> Optional[dict]:
     """The disk snapshot if it exists, is current-version, and its manifest still matches."""
     try:
@@ -1158,7 +1170,7 @@ def _build_snapshot_entry(skill_file: Path, skills_dir: Path, frontmatter: dict,
 def _parse_skill_file(skill_file: Path) -> tuple[bool, dict, str]:
     """Read a SKILL.md once -> (is_compatible, frontmatter, description); errors yield (True, {}, "")."""
     try:
-        frontmatter, _ = parse_frontmatter(skill_file.read_text(encoding="utf-8"))
+        frontmatter, _ = load_skill_metadata(skill_file)
         # Host-platform / runtime-environment gates are offer-time only; explicit loads bypass them.
         if not skill_matches_platform(frontmatter) or not skill_matches_environment(frontmatter):
             return False, frontmatter, ""
@@ -1352,6 +1364,7 @@ def _build_skills_system_prompt_inner(
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())),
+        _skills_manifest_key(skills_dir),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1518,7 +1531,9 @@ def _agents_md_directory_chain(cwd_path: Path) -> list[Path]:
     return [root] + [root.joinpath(*parts[: i + 1]) for i in range(len(parts))]
 
 
-def _load_agents_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
+def _load_agents_md(
+    cwd_path: Path, context_length: Optional[int] = None, *, mode: str = "full", allow_agents: bool = False,
+) -> str:
     """AGENTS.md — merged directory chain from git root down to cwd.
 
     Per directory the first of ``AGENTS.override.md`` / ``AGENTS.md`` / ``agents.md`` wins (a gitignored
@@ -1532,7 +1547,17 @@ def _load_agents_md(cwd_path: Path, context_length: Optional[int] = None) -> str
     files) is deduplicated. With a single match — the common case, and always the case outside a git repo —
     output is identical to the historical single-file behavior.
     """
+    mode = str(mode or "full").strip().lower()
+    if mode == "opt-in" and not allow_agents:
+        return ""
     cwd_resolved = cwd_path.resolve()
+    if mode == "selective":
+        for name in ("AGENTS.override.md", "AGENTS.md", "agents.md"):
+            candidate = cwd_resolved / name
+            content = _read_context_file(candidate)
+            if content:
+                return _context_section(content, name, name, candidate, context_length)
+        return ""
     sections: list[str] = []
     seen_content: set = set()
     for directory in _agents_md_directory_chain(cwd_resolved):
@@ -1581,6 +1606,7 @@ def _load_cursorrules(cwd_path: Path, context_length: Optional[int] = None) -> s
 def build_context_files_prompt(
     cwd: Optional[str] = None, skip_soul: bool = False, context_length: Optional[int] = None,
     allow_install_tree_fallback: bool = False, home_override: "Path | None" = None,
+    agents_mode: str = "full", allow_agents: bool = False,
 ) -> str:
     """Discover and load context files for the system prompt (each capped, see ``_get_context_file_max_chars``).
 
@@ -1603,7 +1629,8 @@ def build_context_files_prompt(
         )
         sections = []
     else:
-        sections = [_load_hermes_md(cwd_path, context_length) or _load_agents_md(cwd_path, context_length)
+        sections = [_load_hermes_md(cwd_path, context_length) or _load_agents_md(
+                        cwd_path, context_length, mode=agents_mode, allow_agents=allow_agents)
                     or _load_claude_md(cwd_path, context_length) or _load_cursorrules(cwd_path, context_length)]
     if not skip_soul:
         sections.append(load_soul_md(context_length, home_override=home_override))

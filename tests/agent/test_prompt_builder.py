@@ -394,6 +394,29 @@ class TestBuildSkillsSystemPrompt:
         second = build_skills_system_prompt()
         assert "cached-skill" not in second
 
+    def test_in_process_prompt_cache_invalidates_when_skill_metadata_changes(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skill_dir = tmp_path / "skills" / "tools" / "mutable-skill"
+        skill_dir.mkdir(parents=True)
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text(
+            "---\nname: mutable-skill\ndescription: first description\n---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("agent.prompt_builder.get_skills_dir", lambda: tmp_path / "skills")
+        monkeypatch.setattr("agent.prompt_builder.get_all_skills_dirs", lambda: [tmp_path / "skills"])
+        monkeypatch.setattr("agent.skill_utils.get_project_skills_dirs", lambda: [])
+        monkeypatch.setattr("agent.prompt_builder.get_disabled_skill_names", lambda *_args: set())
+        first = build_skills_system_prompt()
+        skill_file.write_text(
+            "---\nname: mutable-skill\ndescription: second description\n---\n",
+            encoding="utf-8",
+        )
+        second = build_skills_system_prompt()
+        assert "first description" in first
+        assert "second description" in second
+        assert "first description" not in second
+
 
 # =========================================================================
 # Context files prompt builder
@@ -441,6 +464,23 @@ class TestBuildContextFilesPrompt:
         assert f"## {os.path.join('..', '..', 'AGENTS.md')}" in result
         assert f"## {os.path.join('..', 'AGENTS.md')}" in result
         assert "## AGENTS.md" in result
+
+    def test_agents_md_selective_mode_avoids_repository_root(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "AGENTS.md").write_text("Root rules.")
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "AGENTS.md").write_text("App rules.")
+        result = build_context_files_prompt(cwd=str(app), skip_soul=True, agents_mode="selective")
+        assert "App rules." in result
+        assert "Root rules." not in result
+
+    def test_agents_md_opt_in_mode_is_fail_closed(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("Opt-in rules.")
+        assert build_context_files_prompt(cwd=str(tmp_path), skip_soul=True, agents_mode="opt-in") == ""
+        assert "Opt-in rules." in build_context_files_prompt(
+            cwd=str(tmp_path), skip_soul=True, agents_mode="opt-in", allow_agents=True
+        )
 
     def test_agents_md_chain_skips_gaps(self, tmp_path):
         # Intermediate dirs without AGENTS.md contribute nothing.

@@ -121,10 +121,11 @@ def compute_session_context_breakdown(agent: Any, messages: Optional[List[dict]]
     messages = messages or []
     parts = build_system_prompt_parts(agent)
     stable = parts.get("stable", "") or ""
-    skills_index = _skills_block(stable)
+    volatile = parts.get("volatile", "") or ""
+    skills_index = _skills_block(stable) or _skills_block(volatile)
     memory_block, user_block = _memory_blocks(agent)
     system_prompt_text = _join(
-        _strip_blocks(stable, skills_index), _strip_blocks(parts.get("volatile", "") or "", memory_block, user_block)
+        _strip_blocks(stable, skills_index), _strip_blocks(volatile, skills_index, memory_block, user_block)
     )
     builtin_tools, mcp_tools, subagent_tools = _split_tools(list(getattr(agent, "tools", None) or []))
     tokens_by_id = {

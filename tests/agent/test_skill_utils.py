@@ -21,6 +21,29 @@ from agent.skill_utils import (
 )
 
 
+def test_skill_metadata_cache_reuses_unchanged_file(monkeypatch, tmp_path):
+    from agent import skill_utils
+
+    skill_file = tmp_path / "SKILL.md"
+    skill_file.write_text("---\nname: cached\ndescription: cached\n---\nbody\n", encoding="utf-8")
+    skill_utils.clear_skill_metadata_cache()
+    reads = 0
+    real_read = type(skill_file).read_text
+
+    def counted_read(path, *args, **kwargs):
+        nonlocal reads
+        if path == skill_file:
+            reads += 1
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(skill_file), "read_text", counted_read)
+    first = skill_utils.load_skill_metadata(skill_file)
+    second = skill_utils.load_skill_metadata(skill_file)
+    assert first == second
+    assert reads == 1
+
+
+
 
 
 
@@ -381,4 +404,3 @@ class TestBOMToleranceSiblingSites:
         fm = _split_frontmatter("\ufeff---\nname: bp\n---\nbody")
         assert fm is not None
         assert fm.get("name") == "bp"
-
