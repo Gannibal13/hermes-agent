@@ -6,12 +6,16 @@ import logging
 import os
 import re
 import sys
+import threading
 from pathlib import Path, PurePath
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from hermes_constants import get_config_path, get_skills_dir, is_termux
 
 logger = logging.getLogger(__name__)
+
+_SKILL_METADATA_CACHE: Dict[Tuple[str, Tuple[int, int], Optional[int]], Tuple[Dict[str, Any], str]] = {}
+_SKILL_METADATA_CACHE_LOCK = threading.Lock()
 
 PLATFORM_MAP = {"macos": "darwin", "linux": "linux", "windows": "win32"}
 
@@ -145,6 +149,32 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
                 key, value = line.split(":", 1)
                 frontmatter[key.strip()] = value.strip()
     return frontmatter, body
+
+
+def clear_skill_metadata_cache() -> None:
+    """Clear the shared parsed-metadata cache after bulk skill changes."""
+    with _SKILL_METADATA_CACHE_LOCK:
+        _SKILL_METADATA_CACHE.clear()
+
+
+def load_skill_metadata(skill_file: Path, *, max_chars: Optional[int] = None) -> Tuple[Dict[str, Any], str]:
+    """Read and parse a skill file once per stat fingerprint and requested prefix size."""
+    path = Path(skill_file)
+    try:
+        stat = path.stat()
+        fingerprint = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return {}, ""
+    key = (str(path.resolve()), fingerprint, max_chars)
+    with _SKILL_METADATA_CACHE_LOCK:
+        cached = _SKILL_METADATA_CACHE.get(key)
+    if cached is not None:
+        return dict(cached[0]), cached[1]
+    content = path.read_text(encoding="utf-8")
+    result = parse_frontmatter(content if max_chars is None else content[:max_chars])
+    with _SKILL_METADATA_CACHE_LOCK:
+        _SKILL_METADATA_CACHE[key] = result
+    return dict(result[0]), result[1]
 
 
 def skill_matches_platform_list(platforms: Any) -> bool:
