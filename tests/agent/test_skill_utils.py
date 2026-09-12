@@ -64,6 +64,27 @@ def test_skill_metadata_cache_invalidates_on_file_change_and_preserves_max_chars
     assert limited_body == "seco"
 
 
+def test_skill_metadata_cache_detects_same_size_content_change_with_restored_mtime(tmp_path):
+    import os
+
+    from agent import skill_utils
+
+    skill_file = tmp_path / "SKILL.md"
+    skill_file.write_text("---\nname: alpha\n---\nbody-one\n", encoding="utf-8")
+    skill_utils.clear_skill_metadata_cache()
+    first, _ = skill_utils.load_skill_metadata(skill_file)
+    original_stat = skill_file.stat()
+
+    skill_file.write_text("---\nname: bravo\n---\nbody-two\n", encoding="utf-8")
+    os.utime(skill_file, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    changed, _ = skill_utils.load_skill_metadata(skill_file)
+
+    assert original_stat.st_size == skill_file.stat().st_size
+    assert original_stat.st_mtime_ns == skill_file.stat().st_mtime_ns
+    assert changed["name"] == "bravo"
+    assert first["name"] == "alpha"
+
+
 def test_clear_skill_metadata_cache_forces_next_read(tmp_path, monkeypatch):
     from agent import skill_utils
 
