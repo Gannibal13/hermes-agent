@@ -134,6 +134,24 @@ def test_empty_list_keeps_original_request():
     assert logger.warning.called
 
 
+def test_external_noop_selection_uses_bounded_backoff():
+    class _Engine(_MinimalEngine):
+        def __init__(self):
+            self.calls = 0
+
+        def select_context(self, request_messages, **kwargs):
+            self.calls += 1
+            return None
+
+    engine = _Engine()
+    agent = _agent_with(engine)
+    logger = MagicMock()
+    assert _apply_context_engine_selection(agent, REQUEST, HISTORY, HISTORY[-1], logger=logger) is REQUEST
+    assert _apply_context_engine_selection(agent, REQUEST, HISTORY, HISTORY[-1], logger=logger) is REQUEST
+    assert engine.calls == 1
+    assert 0 < engine._selection_noop_backoff_until
+
+
 def test_engine_mutating_inputs_cannot_corrupt_persisted_state():
     """An engine that mutates its read-only inputs in place must not affect the
     persisted conversation history / incoming message.
@@ -194,15 +212,10 @@ def test_persisted_history_not_mutated():
 
 
 def test_role_unusual_replacement_passed_through_for_downstream_sanitizers():
-    """The hook does structural validation only; role/tool normalization is
-    deferred to the existing downstream sanitizers.
+    """A selection may use unusual role ordering, but must retain the exact
+    current human task before downstream sanitizers see it.
 
-    A `system -> user -> user` replacement (the exact shape flagged as a
-    role-alternation risk on sibling PRs) is well-formed structurally, so the
-    host returns it verbatim. Role-pairing/orphaned-tool cleanup runs *after*
-    this hook in the request pipeline (`_sanitize_api_messages`,
-    `_drop_thinking_only_and_merge_users`), so select_context cannot emit a
-    malformed request that bypasses validation.
+    This replacement drops the current "hello" task and is therefore rejected.
     """
     role_unusual = [
         {"role": "system", "content": "sys"},
@@ -218,7 +231,7 @@ def test_role_unusual_replacement_passed_through_for_downstream_sanitizers():
     out = _apply_context_engine_selection(
         agent, REQUEST, HISTORY, HISTORY[-1], logger=MagicMock()
     )
-    assert out is role_unusual  # accepted structurally; downstream sanitizers normalize
+    assert out is REQUEST  # losing the exact current human task must fail closed
 
 
 # -- on_turn_complete (post-turn observation) ------------------------------
@@ -245,9 +258,6 @@ def test_on_turn_complete_called_with_snapshot_and_meta():
     assert captured["usage"] == {"total_tokens": 12}
     assert captured["kwargs"]["turn_id"] == "t1"
     assert captured["kwargs"]["api_call_count"] == 1
-
-
-
 
 
 

@@ -263,7 +263,14 @@ def main() -> int:
     print(json.dumps({k: (v if not isinstance(v, dict) else {
         kk: vv for kk, vv in v.items() if kk not in ("requests",)
     }) for k, v in result.items()}, indent=2, default=str))
-    return 0
+    checks = []
+    for name, scenario_result in result.items():
+        if not isinstance(scenario_result, dict):
+            continue
+        checks.append(bool(scenario_result.get("provider_requests_total", 0)))
+        checks.append(bool(scenario_result.get("turn1_completed", True)))
+        checks.append(bool(scenario_result.get("turn2_completed", scenario_result.get("resume_completed", True))))
+    return 0 if all(checks) else 1
 
 
 if __name__ == "__main__":

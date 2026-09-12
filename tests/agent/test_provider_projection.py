@@ -125,6 +125,19 @@ def test_garbage_attributes_cannot_break_the_turn():
     assert [m["role"] for m in messages] == ["tool"]
 
 
+def test_replayed_provider_events_are_deduplicated_for_bounded_identity_window():
+    agent = _agent()
+    messages = []
+    response = _response(hermes_projected_messages=[
+        {"id": "evt-1", "role": "tool", "content": "same"},
+    ])
+
+    assert splice_provider_projection(agent, response, messages) == 1
+    assert splice_provider_projection(agent, response, messages) == 0
+    assert len(messages) == 1
+    assert len(agent._provider_projection_seen) <= 256
+
+
 # ── wired into the real conversation loop ────────────────────────────────────
 
 
