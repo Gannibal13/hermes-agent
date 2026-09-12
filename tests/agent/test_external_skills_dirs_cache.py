@@ -103,9 +103,32 @@ def test_cache_key_is_per_config_path(tmp_path, monkeypatch):
 
     monkeypatch.setenv("HERMES_HOME", str(home_a))
     assert get_external_skills_dirs() == [ext_a.resolve()]
-
     monkeypatch.setenv("HERMES_HOME", str(home_b))
     assert get_external_skills_dirs() == [ext_b.resolve()]
+    monkeypatch.setenv("HERMES_HOME", str(home_a))
+    assert get_external_skills_dirs() == [ext_a.resolve()]
+
+
+def test_cache_invalidates_when_config_content_changes_with_same_stat(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    first = tmp_path / "alpha"
+    second = tmp_path / "omega"
+    first.mkdir()
+    second.mkdir()
+    config = home / "config.yaml"
+    config.write_text(f"skills:\n  external_dirs:\n    - {first}\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    _external_dirs_cache_clear()
+    original_stat = config.stat()
+    assert get_external_skills_dirs() == [first.resolve()]
+    config.write_text(f"skills:\n  external_dirs:\n    - {second}\n", encoding="utf-8")
+    os.utime(config, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    assert config.stat().st_size == original_stat.st_size
+    assert get_external_skills_dirs() == [second.resolve()]
+
+    return  # switched-home assertions belong to the per-path cache test above
 
     # And switching back still works — both entries coexist in the cache.
     monkeypatch.setenv("HERMES_HOME", str(home_a))

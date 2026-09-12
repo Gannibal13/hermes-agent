@@ -1275,6 +1275,14 @@ class TestParallelToolCallGuidance:
 
 
 class TestContextFileReadTimeout:
+    def test_selective_mode_does_not_load_root_hermes_md(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".hermes.md").write_text("root-only rules")
+        child = tmp_path / "src"
+        child.mkdir()
+        result = build_context_files_prompt(cwd=str(child), agents_mode="selective")
+        assert "root-only rules" not in result
+
     def test_slow_hermes_md_is_skipped_and_agents_md_still_loads(self, tmp_path, monkeypatch, caplog):
         (tmp_path / ".git").mkdir()
         (tmp_path / ".hermes.md").write_text("Hermes project rules.")

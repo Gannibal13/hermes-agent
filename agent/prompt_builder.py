@@ -5,6 +5,7 @@ with memory and ephemeral prompts.
 """
 
 import contextvars
+import hashlib
 import json
 import logging
 import os
@@ -1087,10 +1088,10 @@ def clear_skills_system_prompt_cache(*, clear_snapshot: bool = False) -> None:
         logger.debug("Could not remove skills prompt snapshot: %s", e)
 
 
-def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
-    """mtime/size manifest of every SKILL.md and DESCRIPTION.md; only the ACTIVE org mirror participates, and
+def _build_skills_manifest(skills_dir: Path) -> dict[str, list]:
+    """Content-aware mtime/size manifest of every SKILL.md and DESCRIPTION.md; only the ACTIVE org mirror participates, and
     the ``.active_org`` marker is included so switching/leaving an org invalidates the snapshot by itself."""
-    manifest: dict[str, list[int]] = {}
+    manifest: dict[str, list] = {}
     skills_dir_str = str(skills_dir)
     prefix_len = len(os.path.join(skills_dir_str, ""))
     active_org = read_active_org_id(skills_dir)
@@ -1112,14 +1113,15 @@ def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
             try:
                 if filename in files:
                     st = os.stat(path)
-                    manifest[path[prefix_len:]] = [st.st_mtime_ns, st.st_size]
+                    digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+                    manifest[path[prefix_len:]] = [st.st_mtime_ns, st.st_size, digest]
             except OSError:
                 pass
     return manifest
 
 
 def _skills_manifest_key(skills_dir: Path) -> tuple:
-    """Stat-only cache key for skill metadata files.
+    """Content-aware cache key for skill metadata files.
 
     The prompt cache is process-local, so checking only its arguments is not enough:
     an in-place SKILL.md edit must invalidate an already rendered index.  Keep this
@@ -1646,7 +1648,8 @@ def build_context_files_prompt(
         )
         sections = []
     else:
-        sections = [_load_hermes_md(cwd_path, context_length) or _load_agents_md(
+        project_context = "" if str(agents_mode).strip().lower() == "selective" else _load_hermes_md(cwd_path, context_length)
+        sections = [project_context or _load_agents_md(
                         cwd_path, context_length, mode=agents_mode, allow_agents=allow_agents)
                     or _load_claude_md(cwd_path, context_length) or _load_cursorrules(cwd_path, context_length)]
     if not skip_soul:

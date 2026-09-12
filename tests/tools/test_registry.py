@@ -29,6 +29,21 @@ def _make_schema(name="test_tool"):
 
 
 class TestRegisterAndDispatch:
+    def test_lazy_schema_loader_is_not_called_until_schema_is_requested(self):
+        reg = ToolRegistry()
+        calls = []
+
+        def load_schema():
+            calls.append(True)
+            return {"parameters": {"type": "object", "properties": {"value": {"type": "string"}}}}
+
+        reg.register("lazy", "plugin", _make_schema("lazy"), _dummy_handler, schema_loader=load_schema)
+        metadata = reg.get_definitions({"lazy"}, metadata_only=True)
+        assert calls == []
+        assert metadata[0]["function"]["name"] == "lazy"
+        assert reg.get_definitions({"lazy"})[0]["function"]["parameters"]["properties"]
+        assert calls == [True]
+
     def test_register_and_dispatch(self):
         reg = ToolRegistry()
         reg.register(
