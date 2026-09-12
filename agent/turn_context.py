@@ -864,6 +864,34 @@ def _persist_turn_start(
     )
 
 
+def _maybe_set_active_task_from_human_turn(
+    agent: Any, *, original_user_message: Any, persist_user_display_kind: Optional[str],
+    effective_task_id: Optional[str], turn_id: Optional[str],
+) -> Any:
+    """Persist the ACTIVE USER GOAL from a clean human message only.
+
+    Contract: the durable active task records exactly what the human asked and is
+    never replaced by synthesized/service turns (they carry ``display_kind``) —
+    an LCM/skill/memory instruction mid-task is honored for that turn but must
+    not overwrite or cancel the user's standing goal. Any storage error is
+    suppressed: the goal latch is an optimization around the turn, never a
+    reason to fail it.
+    """
+    _active_task_db = getattr(agent, "_session_db", None)
+    _set_active_task = getattr(_active_task_db, "set_active_task", None)
+    if (
+        callable(_set_active_task) and not persist_user_display_kind
+        and isinstance(original_user_message, str) and original_user_message
+    ):
+        with suppress(Exception):
+            return _set_active_task(
+                agent.session_id, original_user_message,
+                row_id=getattr(agent, "_persist_user_message_idx", None),
+                task_id=effective_task_id, turn_id=turn_id, provenance="human",
+            )
+    return getattr(agent, "_active_task_source", None)
+
+
 def build_turn_context(
     agent, user_message: Any, system_message: Optional[str],
     conversation_history: Optional[List[Dict[str, Any]]], task_id: Optional[str], stream_callback,
@@ -978,18 +1006,13 @@ def build_turn_context(
 
     # Only the clean human input is authoritative. Provider prompts, tool rows,
     # delegation deliveries, memory and skill scaffolding never enter this state.
-    _active_task_db = getattr(agent, "_session_db", None)
-    _set_active_task = getattr(_active_task_db, "set_active_task", None)
-    if (
-        callable(_set_active_task) and not persist_user_display_kind
-        and isinstance(original_user_message, str) and original_user_message
-    ):
-        with suppress(Exception):
-            agent._active_task_source = _set_active_task(
-                agent.session_id, original_user_message,
-                row_id=getattr(agent, "_persist_user_message_idx", None),
-                task_id=effective_task_id, turn_id=turn_id, provenance="human",
-            )
+    agent._active_task_source = _maybe_set_active_task_from_human_turn(
+        agent,
+        original_user_message=original_user_message,
+        persist_user_display_kind=persist_user_display_kind,
+        effective_task_id=effective_task_id,
+        turn_id=turn_id,
+    )
 
     compaction = run_turn_start_compaction(
         agent, messages=messages, system_message=system_message,
@@ -1005,7 +1028,9 @@ def build_turn_context(
     # Compaction may rebuild message dicts and move the current human row. Keep
     # the durable source anchored by CAS while preserving its exact text.
     _active_source = getattr(agent, "_active_task_source", None)
-    _reanchor = getattr(_active_task_db, "reanchor_active_task", None)
+    _reanchor = getattr(
+        getattr(agent, "_session_db", None), "reanchor_active_task", None
+    )
     if callable(_reanchor) and _active_source is not None:
         with suppress(Exception):
             _updated_source = _reanchor(
