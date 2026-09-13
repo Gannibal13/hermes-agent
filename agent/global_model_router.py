@@ -346,39 +346,42 @@ class GlobalModelRouter:
         task_class: TaskClass,
         min_context_tokens: int = 0,
     ) -> Decision:
-        """Produce a routing decision: pin > manual > cheapest available."""
+        """Produce a routing decision: pin > manual > cheapest available.
+
+        Manual and pinned choices are preferences, not a bypass around hard
+        capability/context constraints. A pinned route that cannot satisfy the
+        request fails closed rather than silently selecting an unsafe route.
+        """
         if not routes:
             return Decision(route=None, task_class=task_class, reason="no routes provided")
 
-        # 1. Pin takes absolute precedence
+        eligible = self.rank_routes(routes, task_class, min_context_tokens)
+        eligible_keys = {(r.provider, r.model) for r in eligible}
+
+        # Pin is persistent and wins over manual/automatic selection, but a
+        # route that cannot satisfy the request is not eligible.
         pin = self.get_pin()
         if pin is not None:
-            for r in routes:
-                rc = self._canonicalize_route(r)
-                if rc.provider == pin[0] and rc.model == pin[1]:
-                    return Decision(route=rc, task_class=task_class, reason="pinned")
+            for r in eligible:
+                if (r.provider, r.model) == pin:
+                    return Decision(route=r, task_class=task_class, reason="pinned")
+            if any((self._canonicalize_route(r).provider, self._canonicalize_route(r).model) == pin for r in routes):
+                return Decision(route=None, task_class=task_class, reason="pinned route cannot satisfy constraints")
 
-        # 2. Manual preference (temporary)
+        # Manual preference is temporary and is skipped only for this decision
+        # when it is cooling down or not eligible; the stored preference stays.
         manual = self.get_manual_preference()
-        if manual is not None:
-            for r in routes:
-                rc = self._canonicalize_route(r)
-                if rc.provider == manual[0] and rc.model == manual[1]:
-                    # Check cooldown
-                    if not self.is_in_cooldown(rc.provider, rc.model):
-                        return Decision(route=rc, task_class=task_class, reason="manual preference")
-                    break  # manual is in cooldown, fall through to auto
+        if manual is not None and manual in eligible_keys:
+            candidate = next(r for r in eligible if (r.provider, r.model) == manual)
+            if not self.is_in_cooldown(candidate.provider, candidate.model):
+                return Decision(route=candidate, task_class=task_class, reason="manual preference")
 
-        # 3. Automatic: cheapest available, skip cooldown
-        ranked = self.rank_routes(routes, task_class, min_context_tokens)
-        for r in ranked:
+        for r in eligible:
             if not self.is_in_cooldown(r.provider, r.model):
                 return Decision(route=r, task_class=task_class, reason="cheapest available")
 
-        # 4. All in cooldown — best-effort: cheapest overall
-        if ranked:
-            return Decision(route=ranked[0], task_class=task_class, reason="best-effort (all in cooldown)")
-
+        if eligible:
+            return Decision(route=eligible[0], task_class=task_class, reason="best-effort (all in cooldown)")
         return Decision(route=None, task_class=task_class, reason="no qualifying routes")
 
     # ------------------------------------------------------------------
@@ -861,3 +864,33 @@ class GlobalModelRouter:
                 })
 
         return snap
+
+
+def infer_task_class(agent: Any) -> TaskClass:
+    """Infer a conservative task class from an AIAgent surface."""
+    platform = str(getattr(agent, "platform", "") or "").lower()
+    if getattr(agent, "is_subagent", False) or "subagent" in platform:
+        return TaskClass.CODING
+    if "review" in platform or "review" in str(getattr(agent, "log_prefix", "")).lower():
+        return TaskClass.REVIEW
+    return TaskClass.NORMAL
+
+
+def attach_agent_router(agent: Any, *, store_path: Path | str | None = None) -> GlobalModelRouter:
+    """Attach the shared router to an AIAgent.
+
+    This is intentionally side-effect-light: it records the current route and
+    does not rewrite provider/model or bypass Hermes' established credential
+    pool. Actual transport recovery remains owned by the existing runtime.
+    """
+    existing = getattr(agent, "_global_model_router", None)
+    if isinstance(existing, GlobalModelRouter):
+        return existing
+    router = GlobalModelRouter(store_path=store_path)
+    setattr(agent, "_global_model_router", router)
+    setattr(agent, "_global_router_task_class", infer_task_class(agent))
+    setattr(agent, "_global_route_lease", None)
+    provider, model = getattr(agent, "provider", None), getattr(agent, "model", None)
+    if provider and model:
+        router.set_route_state(str(provider), str(model), "active")
+    return router

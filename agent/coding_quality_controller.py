@@ -485,6 +485,12 @@ class CodingQualityController:
 
         return "".join(parts)
 
+    def bound_text(self, text: str, task_description: str = "External agent handoff") -> str:
+        """Redact and hard-bound an already assembled handoff string."""
+        prefix = f"TASK: {task_description}\n"
+        body = self.redact_secrets(text or "")
+        return (prefix + body)[: self._max_context_chars]
+
     # ------------------------------------------------------------------
     # Secret redaction
     # ------------------------------------------------------------------
@@ -625,3 +631,17 @@ class CodingQualityController:
             blocked_reason="enforce_verification: "
                            "no verification evidence provided",
         )
+
+
+def attach_quality_controller(agent: Any, *, allowed_paths: Sequence[str] = ()) -> CodingQualityController:
+    """Attach one controller to an AIAgent without changing its transport.
+
+    The controller is deliberately lazy and per-agent: child/background agents
+    receive their own state, while the parent remains the supervisor.
+    """
+    existing = getattr(agent, "_coding_quality_controller", None)
+    if isinstance(existing, CodingQualityController):
+        return existing
+    controller = CodingQualityController(allowed_paths=allowed_paths or ("agent/", "tests/"))
+    setattr(agent, "_coding_quality_controller", controller)
+    return controller

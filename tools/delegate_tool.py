@@ -198,6 +198,14 @@ def _build_child_agent(
     # as auxiliary.review.
     delegation_cfg = _load_config()
     child_toolsets, child_disabled_toolsets = _resolve_child_toolsets(parent_agent, toolsets, effective_role)
+    quality_controller = getattr(parent_agent, "_coding_quality_controller", None)
+    if quality_controller is not None and context:
+        try:
+            context = quality_controller.bound_text(context, task_description=goal)
+        except Exception:
+            # Quality bounds are fail-safe for the handoff, never a reason to
+            # prevent the parent from using the established delegation path.
+            context = str(context)[:32000]
     child_prompt = _build_child_system_prompt(
         goal, context, workspace_path=_resolve_workspace_hint(parent_agent), role=effective_role,
         max_spawn_depth=max_spawn, child_depth=child_depth,

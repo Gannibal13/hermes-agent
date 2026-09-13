@@ -8,7 +8,7 @@ redirect ``_model_request_active`` bracket and the response-vs-redirect crossing
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 import logging
 import time
@@ -122,6 +122,20 @@ def perform_api_call(
     with _bracket:
         if _model_request_active is not None:
             _model_request_active.set()
+    router = getattr(agent, "_global_model_router", None)
+    router_lease = None
+    if router is not None and getattr(agent, "provider", None) and getattr(agent, "model", None):
+        try:
+            import threading as _threading
+            holder = f"{getattr(agent, 'session_id', '')}:{_threading.get_ident()}"
+            router_lease = router.acquire_lease(
+                str(agent.provider), str(agent.model), holder=holder, ttl_seconds=300
+            )
+            agent._global_route_lease = router_lease
+            agent._global_route_lease_contended = not router_lease.acquired
+        except Exception:
+            # Routing telemetry must never break the established provider path.
+            router_lease = None
     try:
         response = run_llm_execution_middleware(
             api_kwargs, _perform_api_call, original_request=_original_api_kwargs,
@@ -130,7 +144,32 @@ def perform_api_call(
             provider=agent.provider, base_url=agent.base_url, api_mode=agent.api_mode,
             api_call_count=api_call_count, middleware_trace=list(_llm_middleware_trace),
         )
+    except BaseException as exc:
+        if router is not None and router_lease is not None and router_lease.acquired:
+            text = str(exc).lower()
+            if "429" in text or "rate limit" in text:
+                failure_type = "rate_limit_429"
+            elif any(x in text for x in ("quota", "insufficient", "credits", "billing")):
+                failure_type = "quota_exhaustion"
+            elif any(x in text for x in ("connection", "timeout", "temporarily unavailable", "503")):
+                failure_type = "provider_down"
+            else:
+                failure_type = "error"
+            with suppress(Exception):
+                router.report_failure(router_lease.lease_id, failure_type)
+        raise
+    else:
+        if router is not None and router_lease is not None and router_lease.acquired:
+            usage = getattr(response, "usage", None)
+            tokens = getattr(usage, "total_tokens", 0) if usage is not None else 0
+            try:
+                tokens = max(0, int(tokens or 0))
+            except (TypeError, ValueError):
+                tokens = 0
+            with suppress(Exception):
+                router.report_success(router_lease.lease_id, tokens_used=tokens)
     finally:
+        agent._global_route_lease = None
         with _bracket:
             if _model_request_active is not None:
                 _model_request_active.clear()
