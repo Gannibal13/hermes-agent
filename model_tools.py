@@ -491,11 +491,27 @@ def _compute_tool_definitions(enabled_toolsets: Optional[List[str]] = None, disa
                               quiet_mode: bool = False, skip_tool_search_assembly: bool = False) -> List[Dict[str, Any]]:
     """Uncached implementation of :func:`get_tool_definitions`."""
     tools_to_include = _select_tool_names(enabled_toolsets, disabled_toolsets, quiet_mode)
+    # Resolve the tool-search policy before asking the registry for schemas. Deferred entries
+    # expose only metadata; their full schema is loaded by tool_describe after selection.
+    try:
+        from tools.tool_search import assemble_tool_defs, is_deferrable_tool_name, load_config as _load_ts_config
+        ts_cfg = _load_ts_config()
+    except Exception:
+        ts_cfg = None
     # Selection is per schema, not per process/profile. Kanban's local checks
     # are uncached; the outer definitions cache already keys on this selection.
     from tools.kanban_toolset_context import scoped_kanban_toolset_selection
     with scoped_kanban_toolset_selection(enabled_toolsets):
-        filtered_tools = _apply_dynamic_schemas(registry.get_definitions(tools_to_include, quiet=quiet_mode))
+        if ts_cfg is not None and not skip_tool_search_assembly and ts_cfg.enabled != "off":
+            metadata_tools = registry.get_definitions(tools_to_include, quiet=quiet_mode, metadata_only=True)
+            metadata_names = {t["function"]["name"] for t in metadata_tools}
+            deferred_names = {name for name in metadata_names
+                              if is_deferrable_tool_name(name, ts_cfg.effective_defer_tools)}
+            visible_tools = registry.get_definitions(metadata_names - deferred_names, quiet=quiet_mode)
+            filtered_tools = _apply_dynamic_schemas(visible_tools)
+            deferred_tools = [t for t in metadata_tools if t["function"]["name"] in deferred_names]
+        else:
+            deferred_tools = []
     global _last_resolved_tool_names
     _last_resolved_tool_names = [t["function"]["name"] for t in filtered_tools]
 
@@ -515,10 +531,12 @@ def _compute_tool_definitions(enabled_toolsets: Optional[List[str]] = None, disa
     # configured share of the context window. Core tools are never deferred.
     # Must be the LAST step (after sanitization); idempotent if called twice.
     try:
-        from tools.tool_search import assemble_tool_defs, load_config as _load_ts_config
-        ts_cfg = _load_ts_config()
         if not skip_tool_search_assembly and ts_cfg.enabled != "off":
-            assembly = assemble_tool_defs(filtered_tools, context_length=_resolve_active_context_length(), config=ts_cfg)
+            assembly = assemble_tool_defs(filtered_tools + deferred_tools,
+                                          context_length=_resolve_active_context_length(), config=ts_cfg)
+            if not assembly.activated and deferred_tools:
+                filtered_tools = _apply_dynamic_schemas(registry.get_definitions(tools_to_include, quiet=quiet_mode))
+                assembly = assemble_tool_defs(filtered_tools, context_length=_resolve_active_context_length(), config=ts_cfg)
             if assembly.activated and not quiet_mode:
                 print(f"🔎 Tool Search (tier {assembly.tier}): {assembly.deferred_count} "
                       f"MCP/plugin tools deferred (~{assembly.deferred_tokens} tokens) behind "

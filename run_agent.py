@@ -745,11 +745,14 @@ class AIAgent(
         instead of hitting the user's GPU mid-session; everything else spawns immediately. ``explicit``
         (/refine) is never deferred but does not touch the ``focus``-keyed delegate/enabled gates.
         """
+        # ``focus`` is the public /refine marker; infer explicit mode for existing callers that
+        # predate the explicit keyword while allowing gateway callers to state it directly.
+        explicit = explicit or bool(focus and focus.strip())
         # Gates run at enqueue/spawn time; the idle dispatcher re-checks `enabled` at dispatch time.
-        if focus is None and getattr(self, "_delegate_depth", 0) > 0:
+        if focus is None and not explicit and getattr(self, "_delegate_depth", 0) > 0:
             return
         task_cfg = None
-        if focus is None:
+        if focus is None and not explicit:
             from agent.background_review import load_background_review_settings
             enabled, task_cfg = load_background_review_settings()
             if not enabled:

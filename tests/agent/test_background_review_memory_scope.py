@@ -23,6 +23,25 @@ if _REPO_ROOT not in sys.path:
 import agent.background_review as bg  # noqa: E402
 
 
+def test_background_review_defaults_off_and_config_errors_fail_closed(monkeypatch):
+    from hermes_cli import config_defaults
+
+    assert config_defaults.DEFAULT_CONFIG["auxiliary"]["background_review"]["enabled"] is False
+    monkeypatch.setattr(bg, "load_config_readonly", lambda: (_ for _ in ()).throw(OSError("no config")), raising=False)
+    with patch("hermes_cli.config.load_config_readonly", side_effect=OSError("no config")):
+        assert bg.load_background_review_settings() == (False, {})
+
+
+def test_background_review_explicit_true_is_preserved():
+    with patch("hermes_cli.config.load_config_readonly", return_value={
+        "auxiliary": {"background_review": {"enabled": True}}
+    }):
+        enabled, task = bg.load_background_review_settings()
+    assert enabled is True
+    assert task["enabled"] is True
+    assert bg.is_background_review_enabled({"enabled": True}) is True
+
+
 def _review_agent(memory_enabled=True, user_profile_enabled=False) -> SimpleNamespace:
     """The whitelist only reads the profile's memory flags off the fork."""
     return SimpleNamespace(_memory_enabled=memory_enabled, _user_profile_enabled=user_profile_enabled)

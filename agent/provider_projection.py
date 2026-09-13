@@ -13,6 +13,7 @@ persisted). Ordinary OpenAI-compatible clients set neither and are unaffected.
 from __future__ import annotations
 
 import logging
+from collections import deque
 from typing import Any
 
 from agent.message_metadata import append_message
@@ -30,6 +31,19 @@ def splice_provider_projection(agent: Any, response: Any, messages: list[dict[st
     """
     projected = getattr(response, "hermes_projected_messages", None)
     rows = [m for m in projected if isinstance(m, dict)] if isinstance(projected, list) else []
+    seen = getattr(agent, "_provider_projection_seen", None)
+    if seen is None:
+        seen = deque(maxlen=256)
+        agent._provider_projection_seen = seen
+    unique_rows = []
+    for row in rows:
+        identity = _projection_identity(row)
+        if identity is not None and identity in seen:
+            continue
+        if identity is not None:
+            seen.append(identity)
+        unique_rows.append(row)
+    rows = unique_rows
     for row in rows:
         append_message(messages, row)
     if rows:
@@ -45,3 +59,17 @@ def splice_provider_projection(agent: Any, response: Any, messages: list[dict[st
         agent._iters_since_skill = getattr(agent, "_iters_since_skill", 0) + iterations
 
     return len(rows)
+
+
+def _projection_identity(row: dict[str, Any]) -> str | None:
+    """Return a stable provider event identity, if the provider supplied one."""
+    for key in ("event_id", "eventId", "response_item_id", "item_id", "id", "tool_call_id"):
+        value = row.get(key)
+        if value:
+            return f"{key}:{value}"
+    calls = row.get("tool_calls")
+    if isinstance(calls, list):
+        ids = [str(c.get("id")) for c in calls if isinstance(c, dict) and c.get("id")]
+        if ids:
+            return "tool_calls:" + ",".join(ids)
+    return None

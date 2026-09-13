@@ -295,6 +295,9 @@ def main() -> int:
     for k, v in result.items():
         if not isinstance(v, dict):
             continue
+        if v.get("provider_requests", 1) == 0:
+            verdict[k] = "FAIL"
+            continue
         if "pass" in v:
             verdict[k] = "PASS" if v["pass"] else "FAIL"
             continue

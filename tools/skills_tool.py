@@ -5,6 +5,7 @@ scripts/. `skills_list` returns name/description only; `skill_view` returns full
 linked files. Sibling modules (skills_tool_setup / _plugin / _dedup) re-export here."""
 
 import json
+import hashlib
 import logging
 import os
 import time
@@ -38,22 +39,31 @@ _SKILLS_CACHE_TTL_SECONDS = 30.0
 
 
 def _skills_scan_signature(dirs_to_scan, disabled) -> tuple:
-    """O(#dirs + #categories) stat-based change signature; platform is read via
-    ``agent.skill_utils.sys`` so test patches are honored."""
+    """Stat-based change signature for skill metadata and directory membership.
+
+    Directory mtimes do not change for an in-place SKILL.md edit on all supported
+    filesystems. Include every discovered metadata file so edits invalidate the
+    listing without reading file contents on a cache hit.
+    """
     from agent import skill_utils as _skill_utils
     platform = getattr(getattr(_skill_utils, "sys", None), "platform", "")
     sig = []
     for d in dirs_to_scan:
         try:
-            m = d.stat().st_mtime
+            root_stat = d.stat()
         except OSError:
             continue
-        with suppress(OSError), os.scandir(d) as it:
-            for entry in it:
+        sig.append((str(d), root_stat.st_mtime_ns, root_stat.st_size))
+        for root, dirs, files in os.walk(d, followlinks=True):
+            dirs[:] = [name for name in dirs if name not in _EXCLUDED_SKILL_DIRS]
+            for filename in ("SKILL.md", "DESCRIPTION.md"):
+                if filename not in files:
+                    continue
+                path = Path(root) / filename
                 with suppress(OSError):
-                    if entry.is_dir(follow_symlinks=False):
-                        m = max(m, entry.stat(follow_symlinks=False).st_mtime)
-        sig.append((str(d), m))
+                    stat = path.stat()
+                    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                    sig.append((str(path), stat.st_mtime_ns, stat.st_size, digest))
     return (tuple(sig), frozenset(disabled), platform)
 
 
@@ -206,7 +216,8 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
             if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
                 continue
             try:
-                frontmatter, body = _parse_frontmatter(_read_skill_text(skill_md)[:4000])
+                from agent.skill_utils import load_skill_metadata
+                frontmatter, body = load_skill_metadata(skill_md, max_chars=4000)
                 if not skill_matches_platform(frontmatter) or not skill_matches_environment(frontmatter):
                     continue
                 name = frontmatter.get("name", skill_md.parent.name)[:MAX_NAME_LENGTH]

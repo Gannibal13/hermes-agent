@@ -603,6 +603,40 @@ class TestRegression_ToolsetScoping:
 
 
 class TestCatalogListing:
+    def test_deferred_catalog_is_metadata_first_but_describe_is_full(self):
+        from tools.registry import registry
+        from tools.tool_search import build_catalog, dispatch_tool_describe, dispatch_tool_search
+
+        name = "mcp_metadata_first_contract"
+        toolset = "mcp-metadata-first"
+        parameters = {
+            "type": "object",
+            "properties": {"document_id": {"type": "string"}, "format": {"type": "string"}},
+            "required": ["document_id"],
+        }
+        registry.register(
+            name=name,
+            handler=lambda args, **kwargs: "{}",
+            schema={"name": name, "description": "Read a document.", "parameters": parameters},
+            toolset=toolset,
+        )
+        defs = [{"type": "function", "function": {
+            "name": name, "description": "Read a document.", "parameters": parameters,
+        }}]
+
+        entry = build_catalog(defs)[0]
+        search_result = json.loads(dispatch_tool_search(
+            {"queries": ["document"]}, current_tool_defs=defs,
+        ))
+        described = json.loads(dispatch_tool_describe(
+            {"names": [name]}, current_tool_defs=defs,
+        ))
+
+        assert entry.schema["function"]["name"] == name
+        assert "parameters" not in entry.schema["function"]
+        assert "parameters" not in search_result["tools"][name]
+        assert described["tools"][name]["parameters"] == parameters
+
     def test_config_defaults(self):
         from tools.tool_search import ToolSearchConfig
         cfg = ToolSearchConfig.from_raw(None)

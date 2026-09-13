@@ -2,10 +2,12 @@
 Import-light by design: no tool registry, CLI config, or provider resolution."""
 
 import ast
+import hashlib
 import logging
 import os
 import re
 import sys
+import threading
 from pathlib import Path, PurePath
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -17,6 +19,13 @@ from hermes_constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+_SKILL_METADATA_CACHE: Dict[
+    Tuple[str, str, Optional[int]],
+    Tuple[Dict[str, Any], str],
+] = {}
+_SKILL_METADATA_CACHE_LOCK = threading.Lock()
+_SKILL_METADATA_CACHE_GENERATION = 0
 
 PLATFORM_MAP = {"macos": "darwin", "linux": "linux", "windows": "win32"}
 
@@ -125,6 +134,42 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     return frontmatter, body
 
 
+def clear_skill_metadata_cache() -> None:
+    """Clear the cache and prevent in-flight readers from repopulating it."""
+    global _SKILL_METADATA_CACHE_GENERATION
+    with _SKILL_METADATA_CACHE_LOCK:
+        _SKILL_METADATA_CACHE.clear()
+        _SKILL_METADATA_CACHE_GENERATION += 1
+
+
+def load_skill_metadata(skill_file: Path, *, max_chars: Optional[int] = None) -> Tuple[Dict[str, Any], str]:
+    """Read and parse a skill file once per content fingerprint and requested prefix size."""
+    with _SKILL_METADATA_CACHE_LOCK:
+        generation = _SKILL_METADATA_CACHE_GENERATION
+    path = Path(skill_file)
+    try:
+        path.stat()
+    except OSError:
+        return {}, ""
+    raw = path.read_bytes()
+    fingerprint = hashlib.sha256(raw).hexdigest()
+    key = (str(path.resolve()), fingerprint, max_chars)
+    with _SKILL_METADATA_CACHE_LOCK:
+        cached = (
+            _SKILL_METADATA_CACHE.get(key)
+            if generation == _SKILL_METADATA_CACHE_GENERATION
+            else None
+        )
+    if cached is not None:
+        return dict(cached[0]), cached[1]
+    text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    result = parse_frontmatter(text if max_chars is None else text[:max_chars])
+    with _SKILL_METADATA_CACHE_LOCK:
+        if generation == _SKILL_METADATA_CACHE_GENERATION:
+            _SKILL_METADATA_CACHE[key] = result
+    return dict(result[0]), result[1]
+
+
 def skill_matches_platform_list(platforms: Any) -> bool:
     """Return True when *platforms* is compatible with the current OS."""
     if not platforms:
@@ -208,7 +253,7 @@ def skill_matches_environment(frontmatter: Dict[str, Any]) -> bool:
     return any(_detect_environment(tag) for tag in tags if tag)
 
 
-_RAW_CONFIG_CACHE: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
+_RAW_CONFIG_CACHE: Dict[Tuple[str, int, int, str], Dict[str, Any]] = {}
 
 
 def _raw_config_cache_clear() -> None:
@@ -216,11 +261,12 @@ def _raw_config_cache_clear() -> None:
     _RAW_CONFIG_CACHE.clear()
 
 
-def _config_cache_key(config_path: Path) -> Optional[Tuple[str, int, int]]:
-    """``(path, mtime_ns, size)`` identity of config.yaml, or None when unreadable/absent."""
+def _config_cache_key(config_path: Path) -> Optional[Tuple[str, int, int, str]]:
+    """Content-aware identity of config.yaml, or None when unreadable/absent."""
     try:
         stat = config_path.stat()
-        return (str(config_path), stat.st_mtime_ns, stat.st_size)
+        digest = hashlib.sha256(config_path.read_bytes()).hexdigest()
+        return (str(config_path), stat.st_mtime_ns, stat.st_size, digest)
     except OSError:
         return None
 
@@ -316,7 +362,7 @@ def _normalize_string_set(values) -> Set[str]:
 
 # config identity -> resolved external dirs. Called once per skill during
 # banner / tool-registry scans; re-resolving each time dominated cold-start.
-_EXTERNAL_DIRS_CACHE: Dict[Tuple[str, int], List[Path]] = {}
+_EXTERNAL_DIRS_CACHE: Dict[Tuple[str, int, int, str], List[Path]] = {}
 
 
 def _external_dirs_cache_clear() -> None:
@@ -341,7 +387,7 @@ def get_external_skills_dirs() -> List[Path]:
     if not config_path.exists():
         return []
     full_key = _config_cache_key(config_path)
-    cache_key = full_key[:2] if full_key is not None else None
+    cache_key = full_key
     cached = _EXTERNAL_DIRS_CACHE.get(cache_key) if cache_key is not None else None
     if cached is not None:
         return list(cached)  # copy so callers can't mutate the cache
@@ -527,23 +573,30 @@ def get_untrusted_project_skills_root() -> Optional[Tuple[Path, int]]:
 # high-confidence findings only. The scan cache lives under HERMES_HOME, never inside the repo (we don't
 # write artifacts into the user's checkout).
 _PROJECT_SCAN_SOURCE = "project-local"
-_PROJECT_QUARANTINE_CACHE: Dict[str, bool] = {}  # skill_dir -> quarantined
+_PROJECT_QUARANTINE_CACHE: Dict[Tuple[str, str], bool] = {}  # (skill_dir, content_hash) -> quarantined
 
 
 def is_quarantined_project_skill(skill_md) -> bool:
     """True when a project skill's scan verdict is ``dangerous``. Fail-closed: a
-    scanner crash or missing scanner quarantines the skill. Scans
-    unconditionally — non-project callers should not call this."""
+    scanner crash or missing scanner quarantines the skill. The in-process cache
+    is content-keyed so edits cannot reuse an old verdict."""
     skill_dir = Path(skill_md).parent
     try:
         key = str(skill_dir.resolve())
     except OSError:
         key = str(skill_dir)
-    if key in _PROJECT_QUARANTINE_CACHE:
-        return _PROJECT_QUARANTINE_CACHE[key]
     try:
-        from tools.skills_guard import scan_skill_cached
+        from tools.skills_guard import content_hash, scan_skill_cached
         from hermes_constants import get_hermes_home
+        digest = content_hash(skill_dir)
+    except Exception:
+        logger.warning("Project skill scan preparation failed — quarantining (fail closed): %s", skill_dir,
+                       exc_info=True)
+        return True
+    cache_key = (key, digest)
+    if cache_key in _PROJECT_QUARANTINE_CACHE:
+        return _PROJECT_QUARANTINE_CACHE[cache_key]
+    try:
         cache_dir = get_hermes_home() / "cache" / "project_skill_scans"
         result, _prov = scan_skill_cached(skill_dir, source=_PROJECT_SCAN_SOURCE, cache_dir=cache_dir)
         quarantined = result.verdict == "dangerous"
@@ -552,7 +605,12 @@ def is_quarantined_project_skill(skill_md) -> bool:
     except Exception:
         logger.warning("Project skill scan failed — quarantining (fail closed): %s", skill_dir, exc_info=True)
         quarantined = True
-    _PROJECT_QUARANTINE_CACHE[key] = quarantined
+    # Keep only the current content verdict for this directory; edits must trigger
+    # a fresh scan without growing this process-local cache indefinitely.
+    for stale_key in tuple(_PROJECT_QUARANTINE_CACHE):
+        if stale_key[0] == key and stale_key != cache_key:
+            _PROJECT_QUARANTINE_CACHE.pop(stale_key, None)
+    _PROJECT_QUARANTINE_CACHE[cache_key] = quarantined
     return quarantined
 
 

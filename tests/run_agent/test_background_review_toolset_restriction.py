@@ -67,7 +67,10 @@ def test_background_review_matches_parent_toolset_config():
         raise RuntimeError("stop after capturing init args")
 
     with patch.object(run_agent.AIAgent, "__init__", _capture_init), \
-         patch("threading.Thread", _SyncThread):
+         patch("threading.Thread", _SyncThread), \
+         patch("agent.background_review.load_background_review_settings",
+
+               return_value=(True, {})):
         agent._spawn_background_review(
             messages_snapshot=[],
             review_memory=True,
@@ -113,7 +116,10 @@ def test_background_review_installs_thread_local_whitelist():
 
     with patch.object(run_agent.AIAgent, "__init__", _no_init), \
          patch.object(_plugins, "set_thread_tool_whitelist", _capture_whitelist), \
-         patch("threading.Thread", _SyncThread):
+         patch("threading.Thread", _SyncThread), \
+         patch("agent.background_review.load_background_review_settings",
+
+               return_value=(True, {})):
         agent._spawn_background_review(
             messages_snapshot=[],
             review_memory=True,
@@ -217,6 +223,7 @@ def test_background_review_whitelist_includes_configured_extra_tools(
     (hermes_home / "config.yaml").write_text(
         "auxiliary:\n"
         "  background_review:\n"
+        "    enabled: true\n"
         "    extra_tools:\n"
         "      - propose_shared_memory\n",
         encoding="utf-8",

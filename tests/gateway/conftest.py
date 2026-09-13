@@ -113,15 +113,22 @@ def _fake_str_enum(enum_name: str, **members: str):
 def _ensure_telegram_mock() -> None:
     """Install a comprehensive telegram mock in sys.modules.
 
-    Idempotent — skips when the real library is already imported.
-    Uses ``sys.modules[name] = mod`` (overwrite) instead of
-    ``setdefault`` so it wins even if a partial/broken import
-    already cached a module with ``ChatType = None``.
+    Idempotent — skips when the real library is already imported OR when this
+    same mock (identified by registry stamp) is already installed. The stamp
+    matters because this module can be imported twice under different names
+    (``conftest`` AND ``tests.gateway.conftest``); without it each copy builds
+    a fresh MagicMock and the second install replaces exception classes that
+    earlier-collected test modules already bound (order-dependent flake).
+    Uses ``sys.modules[name] = mod`` (overwrite) instead of ``setdefault`` so
+    it wins even if a partial/broken import already cached a module.
     """
     if "telegram" in sys.modules and hasattr(sys.modules["telegram"], "__file__"):
         return  # Real library is installed — nothing to mock
+    if getattr(sys.modules.get("telegram"), "_hermes_telegram_mock", False):
+        return  # This exact mock is already installed — keep bound classes stable
 
     mod = MagicMock()
+    mod._hermes_telegram_mock = True
     mod.ext.ContextTypes.DEFAULT_TYPE = type(None)
     # One shared PTB-faithful enum namespace per constant, attached to BOTH
     # access paths: ``sys.modules["telegram.constants"]`` is registered as

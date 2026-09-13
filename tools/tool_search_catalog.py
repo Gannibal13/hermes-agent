@@ -11,7 +11,10 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-import snowballstemmer
+try:
+    import snowballstemmer
+except ImportError:  # minimal embedded/runtime installs may omit optional stemming support
+    snowballstemmer = None
 
 # Reserved bridge names: a user/plugin/MCP tool may not take them (registry override
 # protection rejects such registrations).
@@ -29,9 +32,10 @@ class CatalogEntry:
 
     name: str
     description: str
-    schema: Dict[str, Any]  # the full {"type":"function", "function": {...}} entry
+    schema: Dict[str, Any]  # metadata-only entry; full parameters stay in live defs
     source: str  # "mcp" | "plugin" | "other"
     source_name: str  # toolset name, e.g. "mcp-github" or "kanban"
+    required: List[str] = field(default_factory=list)
     _tokens: List[str] = field(default_factory=list)  # pre-tokenized for BM25
 
 
@@ -45,6 +49,8 @@ def _stem(token: str) -> str:
     mutable parsing state and bridge dispatch runs on parallel tool-call threads, so the
     stemmer is one-per-thread, created lazily."""
     if getattr(_thread_local, "stemmer", None) is None:
+        if snowballstemmer is None:
+            return token.lower()
         _thread_local.stemmer = snowballstemmer.stemmer("english")
     return _thread_local.stemmer.stemWord(token)
 
@@ -110,9 +116,15 @@ def build_catalog(tool_defs: List[Dict[str, Any]]) -> List[CatalogEntry]:
         source, source_name = _classify_source(name)
         # Index the human-facing label ("linear", not "mcp-linear").
         source_label = _listing_group_label(source_name) if source_name else ""
+        parameters = fn.get("parameters") or {}
+        required = parameters.get("required", []) if isinstance(parameters, dict) else []
+        required = [item for item in required if isinstance(item, str)] if isinstance(required, list) else []
+        description = fn.get("description", "") or ""
+        metadata_schema = {"type": "function", "function": {"name": name, "description": description}}
         catalog.append(CatalogEntry(
-            name=name, description=fn.get("description", "") or "", schema=td, source=source,
-            source_name=source_name, _tokens=_tokenize(_entry_search_text(td, source_label))))
+            name=name, description=description, schema=metadata_schema, source=source,
+            source_name=source_name, required=required,
+            _tokens=_tokenize(_entry_search_text(td, source_label))))
     return catalog
 
 

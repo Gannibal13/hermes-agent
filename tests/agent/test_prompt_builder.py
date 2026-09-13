@@ -345,6 +345,41 @@ class TestBuildSkillsSystemPrompt:
         full = build_skills_system_prompt()
         assert "Write threads" in full
 
+    def test_configured_compact_index_keeps_names_and_bounds_descriptions(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skill_dir = tmp_path / "skills" / "engineering" / "long-skill"
+        skill_dir.mkdir(parents=True)
+        description = "A very long description " * 20
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: long-skill\ndescription: {description}\n---\n"
+        )
+        (tmp_path / "config.yaml").write_text("skills:\n  index_mode: compact\n")
+
+        compact = build_skills_system_prompt()
+
+        assert "engineering" in compact
+        assert "long-skill" in compact
+        assert len(description) > 60
+        skill_line = next(line for line in compact.splitlines() if "- long-skill:" in line)
+        assert len(skill_line.split(": ", 1)[1]) <= 60
+
+    def test_full_index_mode_preserves_description(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skill_dir = tmp_path / "skills" / "engineering" / "full-skill"
+        skill_dir.mkdir(parents=True)
+        description = "Full compatibility description " * 4
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: full-skill\ndescription: {description}\n---\n"
+        )
+        (tmp_path / "config.yaml").write_text("skills:\n  index_mode: full\n")
+
+        full = build_skills_system_prompt()
+
+        assert "full-skill" in full
+        assert description.strip() in full
+
 
 
     def test_excludes_disabled_skills(self, monkeypatch, tmp_path):
@@ -394,6 +429,29 @@ class TestBuildSkillsSystemPrompt:
         second = build_skills_system_prompt()
         assert "cached-skill" not in second
 
+    def test_in_process_prompt_cache_invalidates_when_skill_metadata_changes(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skill_dir = tmp_path / "skills" / "tools" / "mutable-skill"
+        skill_dir.mkdir(parents=True)
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text(
+            "---\nname: mutable-skill\ndescription: first description\n---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("agent.prompt_builder.get_skills_dir", lambda: tmp_path / "skills")
+        monkeypatch.setattr("agent.prompt_builder.get_all_skills_dirs", lambda: [tmp_path / "skills"])
+        monkeypatch.setattr("agent.skill_utils.get_project_skills_dirs", lambda: [])
+        monkeypatch.setattr("agent.prompt_builder.get_disabled_skill_names", lambda *_args: set())
+        first = build_skills_system_prompt()
+        skill_file.write_text(
+            "---\nname: mutable-skill\ndescription: second description\n---\n",
+            encoding="utf-8",
+        )
+        second = build_skills_system_prompt()
+        assert "first description" in first
+        assert "second description" in second
+        assert "first description" not in second
+
 
 # =========================================================================
 # Context files prompt builder
@@ -401,6 +459,27 @@ class TestBuildSkillsSystemPrompt:
 
 
 class TestBuildContextFilesPrompt:
+    def test_safe_project_context_mode_does_not_load_root_agents(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        (tmp_path / ".git").mkdir()
+        app = tmp_path / "app"
+        app.mkdir()
+        (tmp_path / "AGENTS.md").write_text("ROOT_ONLY_CONTEXT " + "x" * 5000)
+        (tmp_path / "config.yaml").write_text("skills:\n  project_context_mode: safe\n")
+
+        result = build_context_files_prompt(cwd=str(app), skip_soul=True, agents_mode="selective")
+
+        assert "ROOT_ONLY_CONTEXT" not in result
+
+    def test_full_project_context_mode_keeps_root_agents_compatibility(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        (tmp_path / "AGENTS.md").write_text("ROOT_ONLY_CONTEXT")
+        (tmp_path / "config.yaml").write_text("skills:\n  project_context_mode: full\n")
+
+        result = build_context_files_prompt(cwd=str(tmp_path), skip_soul=True, agents_mode="full")
+
+        assert "ROOT_ONLY_CONTEXT" in result
+
     def test_empty_dir_loads_seeded_global_soul(self, tmp_path):
         from unittest.mock import patch
 
@@ -441,6 +520,23 @@ class TestBuildContextFilesPrompt:
         assert f"## {os.path.join('..', '..', 'AGENTS.md')}" in result
         assert f"## {os.path.join('..', 'AGENTS.md')}" in result
         assert "## AGENTS.md" in result
+
+    def test_agents_md_selective_mode_avoids_repository_root(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "AGENTS.md").write_text("Root rules.")
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "AGENTS.md").write_text("App rules.")
+        result = build_context_files_prompt(cwd=str(app), skip_soul=True, agents_mode="selective")
+        assert "App rules." in result
+        assert "Root rules." not in result
+
+    def test_agents_md_opt_in_mode_is_fail_closed(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("Opt-in rules.")
+        assert build_context_files_prompt(cwd=str(tmp_path), skip_soul=True, agents_mode="opt-in") == ""
+        assert "Opt-in rules." in build_context_files_prompt(
+            cwd=str(tmp_path), skip_soul=True, agents_mode="opt-in", allow_agents=True
+        )
 
     def test_agents_md_chain_skips_gaps(self, tmp_path):
         # Intermediate dirs without AGENTS.md contribute nothing.
@@ -1179,6 +1275,14 @@ class TestParallelToolCallGuidance:
 
 
 class TestContextFileReadTimeout:
+    def test_selective_mode_does_not_load_root_hermes_md(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".hermes.md").write_text("root-only rules")
+        child = tmp_path / "src"
+        child.mkdir()
+        result = build_context_files_prompt(cwd=str(child), agents_mode="selective")
+        assert "root-only rules" not in result
+
     def test_slow_hermes_md_is_skipped_and_agents_md_still_loads(self, tmp_path, monkeypatch, caplog):
         (tmp_path / ".git").mkdir()
         (tmp_path / ".hermes.md").write_text("Hermes project rules.")

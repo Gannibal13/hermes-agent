@@ -6,6 +6,7 @@ tools/*.py import it at module level; model_tools.py imports both; run_agent/cli
 model_tools."""
 
 import ast
+import hashlib
 import functools
 import importlib
 import json
@@ -86,7 +87,7 @@ def _module_registers_tools(module_path: Path) -> bool:
 def discover_builtin_tools(tools_dir: Optional[Path] = None) -> List[str]:
     """Import built-in self-registering tool modules and return their module names. The
     per-file AST scan costs ~145 ms over ~100 files, so verdicts are memoized on disk keyed
-    by ``(mtime_ns, size)``; a mismatch or corrupt cache re-scans that file. The write is
+    by stat plus a content digest; a mismatch or corrupt cache re-scans that file. The write is
     best-effort and atomic, so concurrent processes race harmlessly."""
     tools_path = Path(tools_dir) if tools_dir is not None else Path(__file__).resolve().parent
     cache = _load_discovery_cache()
@@ -99,16 +100,16 @@ def discover_builtin_tools(tools_dir: Optional[Path] = None) -> List[str]:
         abs_path = str(path.resolve())
         try:
             st = path.stat()
-            stat_key = (st.st_mtime_ns, st.st_size)
+            stat_key = (st.st_mtime_ns, st.st_size, hashlib.sha256(path.read_bytes()).hexdigest())
         except OSError:
             continue
         cached = cache.get(abs_path)
-        if isinstance(cached, (list, tuple)) and len(cached) == 3 and tuple(cached[:2]) == stat_key:
-            registers = bool(cached[2])
+        if isinstance(cached, (list, tuple)) and len(cached) == 4 and tuple(cached[:3]) == stat_key:
+            registers = bool(cached[3])
         else:
             registers = _module_registers_tools(path)
             cache_dirty = True
-        fresh_cache[abs_path] = [stat_key[0], stat_key[1], registers]
+        fresh_cache[abs_path] = [stat_key[0], stat_key[1], stat_key[2], registers]
         if registers:
             module_names.append(f"tools.{path.stem}")
 
@@ -178,6 +179,8 @@ class ToolEntry:
     # Zero-arg callable whose dict is shallow-merged onto the schema at every get_definitions()
     # — for fields tracking runtime config (delegate_task's description reflects limits).
     dynamic_schema_overrides: Optional[Callable] = None
+    schema_loader: Optional[Callable] = None
+    loaded_schema: Optional[dict] = None
 
 
 class _PluginOverridePolicy:
@@ -598,7 +601,7 @@ class ToolRegistry:
         check_fn: Callable = None, requires_env: list = None, is_async: bool = False,
         description: str = "", emoji: str = "", max_result_size_chars: int | float | None = None,
         dynamic_schema_overrides: Callable = None, override: bool = False,
-        scope: Optional[str] = None):
+        scope: Optional[str] = None, schema_loader: Callable = None):
         """Register a tool (called at import time by each tool file). ``override=True`` is an
         explicit opt-in for plugins replacing a built-in implementation (e.g. a headed-Chrome
         browser backend); without it, cross-toolset shadowing is rejected."""
@@ -662,7 +665,7 @@ class ToolRegistry:
                 requires_env=requires_env or [], is_async=is_async,
                 description=description or schema.get("description", ""), emoji=emoji,
                 max_result_size_chars=max_result_size_chars,
-                dynamic_schema_overrides=dynamic_schema_overrides)
+                dynamic_schema_overrides=dynamic_schema_overrides, schema_loader=schema_loader)
             # Availability is derived per-tool (_toolset_has_exposable_tools), so this map no
             # longer gates a toolset; it still feeds get_toolset_requirements ->
             # TOOLSET_REQUIREMENTS["check_fn"], which banner.py reads (presence only,
@@ -768,7 +771,7 @@ class ToolRegistry:
 
     # ---- Schema retrieval --------------------------------------------
 
-    def get_definitions(self, tool_names: Set[str], quiet: bool = False) -> List[dict]:
+    def get_definitions(self, tool_names: Set[str], quiet: bool = False, *, metadata_only: bool = False) -> List[dict]:
         """OpenAI-format schemas for the requested tools whose ``check_fn`` passes (or is
         absent). Probes use the ~30 s TTL cache so ``hermes tools enable`` lands quickly."""
         result = []
@@ -782,7 +785,14 @@ class ToolRegistry:
                 if not quiet:
                     logger.debug("Tool %s unavailable (check failed)", name)
                 continue
-            schema_with_name = {**entry.schema, "name": entry.name}
+            schema = entry.schema
+            if not metadata_only and entry.schema_loader is not None:
+                if entry.loaded_schema is None:
+                    loaded = entry.schema_loader()
+                    if isinstance(loaded, dict):
+                        entry.loaded_schema = {**entry.schema, **loaded}
+                schema = entry.loaded_schema or entry.schema
+            schema_with_name = {**schema, "name": entry.name}
             # Runtime-dynamic overrides (e.g. delegate_task limits); the caller's memo is
             # keyed on config.yaml mtime+size, so config changes invalidate it automatically.
             if entry.dynamic_schema_overrides is not None:
@@ -864,7 +874,14 @@ class ToolRegistry:
 
     def get_schema(self, name: str) -> Optional[dict]:
         """Raw schema dict, bypassing check_fn filtering (token estimates, introspection)."""
-        return self._attr(name, "schema")
+        entry = self.get_entry(name)
+        if entry is None:
+            return None
+        if entry.schema_loader is not None and entry.loaded_schema is None:
+            loaded = entry.schema_loader()
+            if isinstance(loaded, dict):
+                entry.loaded_schema = {**entry.schema, **loaded}
+        return dict(entry.loaded_schema or entry.schema)
 
     def get_toolset_for_tool(self, name: str) -> Optional[str]:
         return self._attr(name, "toolset")

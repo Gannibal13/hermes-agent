@@ -21,6 +21,105 @@ from agent.skill_utils import (
 )
 
 
+def test_skill_metadata_cache_reuses_unchanged_file(monkeypatch, tmp_path):
+    from agent import skill_utils
+
+    skill_file = tmp_path / "SKILL.md"
+    skill_file.write_text("---\nname: cached\ndescription: cached\n---\nbody\n", encoding="utf-8")
+    skill_utils.clear_skill_metadata_cache()
+    parses = 0
+    real_parse = skill_utils.parse_frontmatter
+
+    def counted_parse(content):
+        nonlocal parses
+        parses += 1
+        return real_parse(content)
+
+    monkeypatch.setattr(skill_utils, "parse_frontmatter", counted_parse)
+    first = skill_utils.load_skill_metadata(skill_file)
+    second = skill_utils.load_skill_metadata(skill_file)
+    assert first == second
+    assert parses == 1
+
+
+def test_skill_metadata_cache_invalidates_on_file_change_and_preserves_max_chars(tmp_path):
+    from agent import skill_utils
+
+    skill_file = tmp_path / "SKILL.md"
+    skill_file.write_text("---\nname: first\n---\nfirst body\n", encoding="utf-8")
+    skill_utils.clear_skill_metadata_cache()
+
+    first, first_body = skill_utils.load_skill_metadata(skill_file, max_chars=25)
+    assert first["name"] == "first"
+    assert first_body == "first"
+
+    skill_file.write_text("---\nname: second\n---\nsecond body\n", encoding="utf-8")
+    changed, changed_body = skill_utils.load_skill_metadata(skill_file, max_chars=None)
+    assert changed["name"] == "second"
+    assert changed_body == "second body\n"
+
+    limited, limited_body = skill_utils.load_skill_metadata(skill_file, max_chars=25)
+    assert limited["name"] == "second"
+    assert limited_body == "seco"
+
+
+def test_skill_metadata_cache_detects_same_size_content_change_with_restored_mtime(tmp_path):
+    import os
+
+    from agent import skill_utils
+
+    skill_file = tmp_path / "SKILL.md"
+    skill_file.write_text("---\nname: alpha\n---\nbody-one\n", encoding="utf-8")
+    skill_utils.clear_skill_metadata_cache()
+    first, _ = skill_utils.load_skill_metadata(skill_file)
+    original_stat = skill_file.stat()
+
+    skill_file.write_text("---\nname: bravo\n---\nbody-two\n", encoding="utf-8")
+    os.utime(skill_file, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    changed, _ = skill_utils.load_skill_metadata(skill_file)
+
+    assert original_stat.st_size == skill_file.stat().st_size
+    assert original_stat.st_mtime_ns == skill_file.stat().st_mtime_ns
+    assert changed["name"] == "bravo"
+    assert first["name"] == "alpha"
+
+
+def test_skill_metadata_cache_hashes_and_parses_the_same_snapshot(tmp_path, monkeypatch):
+    from agent import skill_utils
+
+    skill_file = tmp_path / "SKILL.md"
+    skill_file.write_text("---\nname: alpha\n---\nbody-one\n", encoding="utf-8")
+    skill_utils.clear_skill_metadata_cache()
+
+    def inconsistent_second_read(*args, **kwargs):
+        return "---\nname: bravo\n---\nbody-two\n"
+
+    monkeypatch.setattr(type(skill_file), "read_text", inconsistent_second_read)
+    metadata, body = skill_utils.load_skill_metadata(skill_file)
+
+    assert metadata["name"] == "alpha"
+    assert body == "body-one\n"
+
+
+def test_clear_skill_metadata_cache_forces_next_read(tmp_path, monkeypatch):
+    from agent import skill_utils
+
+    skill_file = tmp_path / "SKILL.md"
+    skill_file.write_text("---\nname: clearable\n---\nbody\n", encoding="utf-8")
+    skill_utils.clear_skill_metadata_cache()
+    parses = 0
+    real_parse = skill_utils.parse_frontmatter
+
+    def counted_parse(content):
+        nonlocal parses
+        parses += 1
+        return real_parse(content)
+
+    monkeypatch.setattr(skill_utils, "parse_frontmatter", counted_parse)
+    skill_utils.load_skill_metadata(skill_file)
+    skill_utils.clear_skill_metadata_cache()
+    skill_utils.load_skill_metadata(skill_file)
+    assert parses == 2
 
 
 
@@ -29,6 +128,46 @@ from agent.skill_utils import (
 
 
 
+
+
+
+
+
+def test_clear_skill_metadata_cache_blocks_inflight_repopulation(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from agent import skill_utils
+
+    skill_file = tmp_path / "SKILL.md"
+    skill_file.write_text("---\nname: raced\n---\nbody\n", encoding="utf-8")
+    skill_utils.clear_skill_metadata_cache()
+    read_started = threading.Event()
+    allow_read_to_finish = threading.Event()
+    reads = 0
+    real_read = type(skill_file).read_bytes
+
+    def blocked_read(path, *args, **kwargs):
+        nonlocal reads
+        if path == skill_file:
+            reads += 1
+            if reads == 1:
+                read_started.set()
+                assert allow_read_to_finish.wait(timeout=5)
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(skill_file), "read_bytes", blocked_read)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        loader = executor.submit(skill_utils.load_skill_metadata, skill_file)
+        assert read_started.wait(timeout=5)
+
+        skill_utils.clear_skill_metadata_cache()
+        allow_read_to_finish.set()
+        first_metadata, _ = loader.result(timeout=5)
+    assert first_metadata["name"] == "raced"
+
+    skill_utils.load_skill_metadata(skill_file)
+    assert reads == 2
 
 
 def test_skill_config_helpers_share_raw_config_parse_cache(tmp_path, monkeypatch):
@@ -409,4 +548,3 @@ class TestBOMToleranceSiblingSites:
         fm = _split_frontmatter("\ufeff---\nname: bp\n---\nbody")
         assert fm is not None
         assert fm.get("name") == "bp"
-

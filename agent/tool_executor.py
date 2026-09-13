@@ -48,6 +48,8 @@ from agent.tool_dispatch_helpers import (
 from tools.terminal_tool_lifecycle import get_active_env
 from tools.thread_context import propagate_context_to_thread
 from tools.tool_result_storage import (
+    ToolResultPersistenceError,
+    generate_preview,
     maybe_persist_tool_result,
     enforce_turn_budget,
     extract_persisted_path,
@@ -55,6 +57,12 @@ from tools.tool_result_storage import (
 from tools.budget_config import BudgetConfig, DEFAULT_BUDGET, budget_for_context_window
 
 logger = logging.getLogger(__name__)
+
+
+def _live_tool_preview(result: Any, limit: int = 1_500) -> str:
+    """Keep live UI/event payloads bounded; the committed tool message owns durability."""
+    preview, has_more = generate_preview(result if isinstance(result, str) else str(result), limit)
+    return preview + ("\n..." if has_more else "")
 
 
 _pairing_tool_call_id = coalesce_tool_call_id  # canonical id used by the persisted assistant message
@@ -952,7 +960,10 @@ def _emit_tool_complete_and_risk(agent, ref: _ToolCallRef, result, risk_metadata
         except Exception as cb_err:
             logging.debug("Tool complete callback error: %s", cb_err)
         else:
-            _safe_callback(agent.tool_complete_callback, "Tool complete", ref.call_id, ref.name, display_args, result)
+            _safe_callback(
+                agent.tool_complete_callback, "Tool complete", ref.call_id, ref.name,
+                display_args, _live_tool_preview(result),
+            )
     if risk_metadata is not None and risk_metadata.get("risk") != "low":
         _safe_callback(
             agent.tool_progress_callback, "Tool output risk",
@@ -1010,13 +1021,37 @@ def _commit_tool_result(
 
     persisted_result = function_result
     if not _is_multimodal_tool_result(persisted_result):
-        persisted_result = maybe_persist_tool_result(
-            content=persisted_result,
-            tool_name=function_name,
-            tool_use_id=tool_call_id,
-            env=get_active_env(effective_task_id),
-            config=budget,
-        )
+        try:
+            persisted_result = maybe_persist_tool_result(
+                content=persisted_result,
+                tool_name=function_name,
+                tool_use_id=tool_call_id,
+                env=get_active_env(effective_task_id),
+                config=budget,
+            )
+        except ToolResultPersistenceError:
+            # FAIL-VISIBLE, never fail-silent and never a whole-turn crash: durable
+            # storage is unavailable (disk full, permissions, no sandbox write). The
+            # wire keeps a bounded preview plus an explicit STORAGE FAILURE marker so
+            # the model knows the payload is NOT on disk and must not re-request it
+            # blindly; the error is logged loudly. Nothing oversized is silently
+            # truncated into a plausible-looking inline result.
+            logger.error(
+                "TOOL RESULT STORAGE FAILURE: tool %s (%s) produced %d chars that could "
+                "not be durably saved; continuing with a bounded preview",
+                function_name, tool_call_id, len(persisted_result),
+            )
+            _fail_preview, _fail_more = generate_preview(
+                persisted_result, max_chars=budget.preview_size
+            )
+            persisted_result = (
+                "[STORAGE FAILURE] The full tool output could not be saved to durable "
+                "storage (disk/permission error). The content below is a bounded "
+                "preview; it is NOT recoverable later. Treat the tool result as "
+                "partial and avoid re-requesting oversized payloads.\n"
+                + _fail_preview
+                + ("\n..." if _fail_more else "")
+            )
     _record_persisted_path_for_stub(agent, tool_call_id, persisted_result)
 
     subdir_hints = agent._subdirectory_hints.check_tool_call(function_name, function_args)
@@ -1040,7 +1075,8 @@ def _commit_tool_result(
         # reconstruct the result even if the UI bridge dies mid-projection.
         _safe_callback(
             agent.tool_progress_callback, "Tool progress",
-            "tool.completed", function_name, None, None, duration=tool_duration, is_error=is_error, result=function_result,
+            "tool.completed", function_name, None, None, duration=tool_duration, is_error=is_error,
+            result=_live_tool_preview(function_result),
         )
     return persisted_result, function_result, tool_message.get("_tool_output_risk")
 

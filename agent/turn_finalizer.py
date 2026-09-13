@@ -487,6 +487,13 @@ def finalize_turn(
 
     _guarded_cleanup("persist_session", _persist_step, _cleanup_errors, logger)
 
+    # ACTIVE GOAL CONTRACT: the durable active task is NEVER auto-completed by a
+    # clean turn. It survives service-instruction turns, compaction, resume, child
+    # tasks and tool errors so execution continues after interruptions. It is
+    # replaced by the next pure human message (turn_context) or cleared by an
+    # explicit completion call — a model reply with no tool calls is not evidence
+    # the user's goal is done.
+
     # Keep the gateway's separate in-memory history snapshot current even on
     # cleanup error, so a later prompt isn't sent with a pre-turn snapshot.
     with suppress(Exception):

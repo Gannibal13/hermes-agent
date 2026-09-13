@@ -1183,6 +1183,10 @@ def _apply_context_engine_selection(
     if not _engine_overrides_hook(engine, "select_context"):
         return api_messages
 
+    from agent.context_engine import context_selection_backoff_active, record_context_selection_result
+    if context_selection_backoff_active(engine):
+        return api_messages
+
     session_label = getattr(agent, "session_id", None) or "-"
     # Structural clones: the engine must not be able to write through nested
     # containers into persisted history; only the request list is acted on (#80498).
@@ -1207,10 +1211,19 @@ def _apply_context_engine_selection(
         return api_messages
 
     if selected is None:
+        record_context_selection_result(engine, no_op=True)
         return api_messages
     # Require a NON-EMPTY list of dicts: ``all([])`` is ``True``, so a ``[]`` from a
     # buggy engine would otherwise replace the request instead of failing open.
-    if isinstance(selected, list) and selected and all(isinstance(m, dict) for m in selected):
+    if (isinstance(selected, list) and selected and all(isinstance(m, dict) for m in selected)):
+        from agent.context_engine import selection_preserves_current_human_task
+        if not selection_preserves_current_human_task(selected, incoming_message):
+            logger.warning(
+                "Context engine select_context dropped the current human task; ignoring selection (session=%s)",
+                session_label,
+            )
+            return api_messages
+        record_context_selection_result(engine, no_op=(selected == api_messages))
         return selected
     logger.warning(
         "Context engine select_context returned an invalid value "

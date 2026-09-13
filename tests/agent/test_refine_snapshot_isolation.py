@@ -27,6 +27,8 @@ def _agent_with_real_chokepoint():
     agent = MagicMock()
     agent.valid_tool_names = {"memory"}
     agent._delegate_depth = 0
+    agent._background_review_lock = threading.Lock()
+    agent._background_review_run = None
     agent._spawn_background_review = AIAgent._spawn_background_review.__get__(agent)
     return agent
 
@@ -116,3 +118,4 @@ async def test_gateway_refine_snapshot_does_not_alias_live_history():
     agent._spawn_background_review_now.assert_called_once()
     snapshot = agent._spawn_background_review_now.call_args.kwargs["messages_snapshot"]
     _assert_isolated(agent._session_messages, snapshot)
+    assert agent._spawn_background_review_now.call_args.kwargs["explicit"] is True

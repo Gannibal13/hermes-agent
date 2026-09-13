@@ -209,6 +209,11 @@ def test_background_review_releases_clients_without_closing_shared_session(monke
     monkeypatch.setattr(run_agent_module.threading, "Thread", ImmediateThread)
 
     agent = _bare_agent()
+    # Automatic reviews are opt-in by default now (token economy); these tests
+    # exercise spawn mechanics, not the enabled gate (covered separately).
+    monkeypatch.setattr(
+        "agent.background_review.load_background_review_settings", lambda: (True, {})
+    )
 
     AIAgent._spawn_background_review(
         agent,
@@ -256,6 +261,11 @@ def test_background_review_fork_opts_out_of_session_finalization(monkeypatch):
     monkeypatch.setattr(run_agent_module.threading, "Thread", ImmediateThread)
 
     agent = _bare_agent()
+    # Automatic reviews are opt-in by default now (token economy); this test
+    # exercises spawn mechanics, not the enabled gate (covered separately).
+    monkeypatch.setattr(
+        "agent.background_review.load_background_review_settings", lambda: (True, {})
+    )
 
     AIAgent._spawn_background_review(
         agent,
@@ -330,6 +340,11 @@ def test_background_review_runs_at_top_level(monkeypatch):
 
     agent = _bare_agent()
     agent._delegate_depth = 0  # top-level agent
+    # Automatic reviews are opt-in by default now (token economy); this test
+    # guards the subagent skip, not the enabled gate (covered separately).
+    monkeypatch.setattr(
+        "agent.background_review.load_background_review_settings", lambda: (True, {})
+    )
 
     AIAgent._spawn_background_review(
         agent,
@@ -434,6 +449,11 @@ def test_background_review_registers_before_start_runs_and_cleans_up(monkeypatch
     monkeypatch.setattr(run_agent_module.threading, "Thread", CapturingThread)
 
     agent = _bare_agent()
+    # Automatic reviews are opt-in by default now (token economy); this test
+    # exercises spawn mechanics, not the enabled gate (covered separately).
+    monkeypatch.setattr(
+        "agent.background_review.load_background_review_settings", lambda: (True, {})
+    )
 
     AIAgent._spawn_background_review(
         agent,
@@ -506,6 +526,11 @@ def test_live_turn_waits_for_review_exit_before_relay_and_turn_context(monkeypat
     monkeypatch.setattr(run_agent_module.threading, "Thread", CapturingThread)
 
     agent = _bare_agent()
+    # Automatic reviews are opt-in by default now (token economy); this test
+    # exercises spawn mechanics, not the enabled gate (covered separately).
+    monkeypatch.setattr(
+        "agent.background_review.load_background_review_settings", lambda: (True, {})
+    )
     AIAgent._spawn_background_review(
         agent,
         messages_snapshot=[{"role": "user", "content": "hello"}],
@@ -571,6 +596,11 @@ def test_live_turn_cancels_review_during_startup_before_provider(monkeypatch):
     monkeypatch.setattr(run_agent_module.threading, "Thread", CapturingThread)
 
     agent = _bare_agent()
+    # Automatic reviews are opt-in by default now (token economy); this test
+    # exercises spawn mechanics, not the enabled gate (covered separately).
+    monkeypatch.setattr(
+        "agent.background_review.load_background_review_settings", lambda: (True, {})
+    )
     AIAgent._spawn_background_review(
         agent,
         messages_snapshot=[{"role": "user", "content": "hello"}],
@@ -643,6 +673,11 @@ def test_live_turn_proceeds_when_review_acknowledgement_times_out(monkeypatch):
     )
 
     agent = _bare_agent()
+    # Automatic reviews are opt-in by default now (token economy); this test
+    # exercises spawn mechanics, not the enabled gate (covered separately).
+    monkeypatch.setattr(
+        "agent.background_review.load_background_review_settings", lambda: (True, {})
+    )
     AIAgent._spawn_background_review(
         agent,
         messages_snapshot=[{"role": "user", "content": "hello"}],
@@ -758,6 +793,11 @@ def test_stale_review_cleanup_cannot_clear_or_signal_newer_review(monkeypatch):
     monkeypatch.setattr(run_agent_module.threading, "Thread", CapturingThread)
 
     agent = _bare_agent()
+    # Automatic reviews are opt-in by default now (token economy); this test
+    # exercises spawn mechanics, not the enabled gate (covered separately).
+    monkeypatch.setattr(
+        "agent.background_review.load_background_review_settings", lambda: (True, {})
+    )
     AIAgent._spawn_background_review(
         agent,
         messages_snapshot=[{"role": "user", "content": "first"}],

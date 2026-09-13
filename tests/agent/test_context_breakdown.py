@@ -50,6 +50,20 @@ def test_breakdown_includes_major_categories():
     assert data["estimated_total"] > 0
 
 
+def test_breakdown_accounts_for_skills_in_volatile_tier():
+    parts = {
+        "stable": "identity",
+        "context": "rules",
+        "volatile": "<available_skills>\n  tools: demo\n</available_skills>\nCurrent time: now",
+    }
+    agent, _ = _make_agent(stable="identity", context="rules", volatile="volatile")
+    with patch("agent.system_prompt.build_system_prompt_parts", return_value=parts):
+        data = compute_session_context_breakdown(agent, [])
+    by_id = {item["id"]: item["tokens"] for item in data["categories"]}
+    assert by_id["skills"] > 0
+    assert by_id["system_prompt"] == (len("identity") + 3) // 4 + (len("Current time: now") + 3) // 4
+
+
 
 # ── /context renderers (pure functions over the payload) ────────────────────
 
@@ -124,5 +138,4 @@ def test_details_lines_caps_listing():
     }
     lines = render_context_details_lines(details)
     assert any("… and 5 more" in line for line in lines)
-
 

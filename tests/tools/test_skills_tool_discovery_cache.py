@@ -9,6 +9,7 @@ hermes_cli/profiles.py::_count_skills) plus the disabled-set, with a short
 TTL bounding in-place SKILL.md edit staleness.
 """
 
+import os
 import time
 
 import pytest
@@ -66,3 +67,26 @@ def test_disabled_and_full_views_cached_separately(tmp_path, monkeypatch):
     everything = sorted(s["name"] for s in st._find_all_skills(skip_disabled=True))
     assert filtered == ["skill-one"]
     assert everything == ["skill-one", "skill-two"]
+
+
+def test_in_place_skill_edit_invalidates_discovery_cache(tmp_path):
+    skill_dir = _write_skill(tmp_path, "cat-a", "skill-one", description="before")
+    assert st._find_all_skills()[0]["description"] == "before"
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: skill-one\ndescription: after\n---\n", encoding="utf-8"
+    )
+    assert st._find_all_skills()[0]["description"] == "after"
+
+
+def test_skill_metadata_edit_with_same_stat_invalidates_cache(tmp_path):
+    skill_dir = _write_skill(tmp_path, "cat-a", "skill-one", description="before")
+    assert st._find_all_skills()[0]["description"] == "before"
+    skill_file = skill_dir / "SKILL.md"
+    original_stat = skill_file.stat()
+    skill_file.write_text(
+        "---\nname: skill-one\ndescription: after!\n---\n# skill-one\n",
+        encoding="utf-8",
+    )
+    os.utime(skill_file, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    assert skill_file.stat().st_size == original_stat.st_size
+    assert st._find_all_skills()[0]["description"] == "after!"

@@ -143,9 +143,9 @@ def cancel_background_review_for_live_turn(agent: Any) -> None:
         )
 
 
-# Aux-model routing: by default ("auto") the fork runs on the MAIN model and replays the full
-# conversation as warm cache reads. When auxiliary.background_review.{provider,model} routes it
-# to a DIFFERENT model the cache is cold anyway, so the fork replays a compact digest instead.
+# Aux-model routing: by default ("auto") the fork runs on the MAIN model; an explicit
+# auxiliary.background_review route uses a different model. Both paths receive the bounded
+# transcript projection below before their first provider request.
 _REVIEW_MAX_ITERATIONS = 16
 # Aggregate INPUT-token budget for one review fork (checked in conversation_loop's
 # ``_review_input_budget_exhausted``). Request #1 replays the full snapshot as a warm cache read
@@ -153,6 +153,9 @@ _REVIEW_MAX_ITERATIONS = 16
 # request, but nothing else caps the SUM across the tool loop. 2x the historical 300k foreground
 # trigger. Override via ``auxiliary.background_review.max_input_tokens``; <= 0 disables.
 _REVIEW_MAX_INPUT_TOKENS_DEFAULT = 600_000
+# The first request is sent before the fork's input-budget/compaction gates can run. Keep the
+# foreground transcript projection bounded at that boundary for both warm and routed reviews.
+REVIEW_HISTORY_CHAR_CAP = 32_000
 
 
 def _task_block(cfg: Any) -> Dict[str, Any]:
@@ -185,20 +188,24 @@ def _review_input_token_budget(task_cfg: Optional[Dict[str, Any]] = None) -> Opt
 
 
 def load_background_review_settings() -> tuple[bool, Dict[str, Any]]:
-    """Single config read -> ``(enabled, task_cfg)``. Fail-open (``enabled=True``) so a broken
-    config never silently disables reviews — but WARN so the cost is visible."""
+    """Single config read -> ``(enabled, task_cfg)``.
+
+    Automatic reviews are opt-in and configuration failures fail closed: a broken or unavailable
+    config must not unexpectedly spend auxiliary tokens. Explicit ``/refine`` bypasses this gate
+    at the caller and remains available.
+    """
     try:
         from hermes_cli.config import load_config_readonly
         from utils import is_truthy_value
         task = _task_block(load_config_readonly())
-        return is_truthy_value(task.get("enabled"), default=True), task
+        return is_truthy_value(task.get("enabled"), default=False), task
     except Exception:
         logger.warning(
-            "Failed to read background_review.enabled; leaving automatic "
-            "review enabled (fail-open)",
+            "Failed to read background_review.enabled; disabling automatic "
+            "review (fail-closed)",
             exc_info=True,
         )
-        return True, {}
+        return False, {}
 
 
 def _resolve_review_runtime(agent: Any, task_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -262,9 +269,7 @@ def _msg_text(m: Dict) -> str:
 
 
 def _digest_history(messages_snapshot: List[Dict], tail: int = 24) -> List[Dict]:
-    """Compact replay for the routed (different-model) path only: keep the recent ``tail``
-    messages verbatim (extended so the kept run never starts on a tool result) and collapse older
-    turns into one synthetic user-role digest, preserving role alternation."""
+    """Build a compact replay and apply the same hard cap to every review runtime path."""
     msgs = list(messages_snapshot or [])
     while len(msgs) > tail:
         keep = msgs[-tail:]
@@ -272,7 +277,7 @@ def _digest_history(messages_snapshot: List[Dict], tail: int = 24) -> List[Dict]
             break
         tail += 1
     else:
-        return msgs
+        return _bound_review_history(msgs)
     lines: List[str] = []
     for m in msgs[:-len(keep)]:
         if not isinstance(m, dict):
@@ -291,7 +296,35 @@ def _digest_history(messages_snapshot: List[Dict], tail: int = 24) -> List[Dict]
         "review's cold-write cost on the routed aux model. Recent turns "
         "follow verbatim below.]\n" + "\n".join(lines)
     )
-    return [{"role": "user", "content": digest}] + keep
+    return _bound_review_history([{"role": "user", "content": digest}] + keep)
+
+
+def _bound_review_history(messages: List[Dict]) -> List[Dict]:
+    """Return a compact transcript projection whose content has one shared hard cap."""
+    projected = list(messages)
+    total = sum(len(str(m.get("content", ""))) for m in projected if isinstance(m, dict))
+    if total <= REVIEW_HISTORY_CHAR_CAP:
+        return projected
+    # Preserve roles and tool-call names, but never replay an unbounded tool payload into request #1.
+    compact = []
+    for message in projected:
+        if not isinstance(message, dict):
+            continue
+        item = {"role": message.get("role", "user")}
+        content = _msg_text(message)
+        if content:
+            item["content"] = content[:400]
+        if message.get("tool_calls") and item["role"] == "assistant":
+            item["tool_calls"] = [
+                {"id": tc.get("id", ""), "function": {"name": (tc.get("function") or {}).get("name", "?")}}
+                for tc in message["tool_calls"] if isinstance(tc, dict)
+            ]
+        compact.append(item)
+    while sum(len(str(m.get("content", ""))) for m in compact) > REVIEW_HISTORY_CHAR_CAP and compact:
+        largest = max(compact, key=lambda m: len(str(m.get("content", ""))))
+        text = str(largest.get("content", ""))
+        largest["content"] = text[:max(0, len(text) - 512)]
+    return compact
 
 
 # Review prompts. AIAgent exposes them as class attributes (``_MEMORY_REVIEW_PROMPT`` etc.) so
@@ -1058,7 +1091,7 @@ def _run_review_fork(
                     "management tools. Other tools will be denied "
                     "at runtime — do not attempt them." + prompt_extra
                 ),
-                conversation_history=_digest_history(messages_snapshot) if _routed else messages_snapshot,
+                conversation_history=_digest_history(messages_snapshot),
             )
     finally:
         clear_thread_tool_whitelist()
@@ -1224,7 +1257,7 @@ def is_background_review_enabled(
 ) -> bool:
     """Return whether automatic post-turn background review may spawn.
 
-    Controlled by ``auxiliary.background_review.enabled`` (default ``true``).
+    Controlled by ``auxiliary.background_review.enabled`` (default ``false``).
     Explicit ``/refine`` (``focus`` set) bypasses this gate — same contract as
     zeroing the nudge intervals, which stops automatic forks but leaves manual
     refine working (issue #87250).
@@ -1236,14 +1269,14 @@ def is_background_review_enabled(
         try:
             from utils import is_truthy_value
 
-            return is_truthy_value(task_cfg.get("enabled"), default=True)
+            return is_truthy_value(task_cfg.get("enabled"), default=False)
         except Exception:
             logger.warning(
-                "Failed to interpret background_review.enabled; leaving "
-                "automatic review enabled (fail-open)",
+                "Failed to interpret background_review.enabled; disabling "
+                "automatic review (fail-closed)",
                 exc_info=True,
             )
-            return True
+            return False
     enabled, _ = load_background_review_settings()
     return enabled
 # ---- END PLUGIN-COMPAT ----

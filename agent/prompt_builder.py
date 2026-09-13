@@ -5,6 +5,7 @@ with memory and ephemeral prompts.
 """
 
 import contextvars
+import hashlib
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ from agent.runtime_cwd import resolve_agent_cwd
 from agent.skill_utils import (
     EXCLUDED_SKILL_DIRS, ORG_ACTIVE_MARKER, ORG_MIRROR_DIR_NAME, ORG_PROVENANCE_FILE, SKILL_SUPPORT_DIRS,
     extract_skill_conditions, extract_skill_description, get_all_skills_dirs, get_disabled_skill_names,
+    load_skill_metadata,
     iter_skill_index_files, parse_frontmatter, read_active_org_id, skill_matches_environment,
     skill_matches_platform, skill_matches_platform_list,
 )
@@ -1070,8 +1072,8 @@ def drain_truncation_warnings() -> list:
 _SKILLS_PROMPT_CACHE_MAX = 32
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
-# v2 added org provenance fields (org_id/org_author); older snapshots are rebuilt.
-_SKILLS_SNAPSHOT_VERSION = 2
+# v3 stores full descriptions so compact/full rendering can be selected without rescanning.
+_SKILLS_SNAPSHOT_VERSION = 3
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -1089,10 +1091,10 @@ def clear_skills_system_prompt_cache(*, clear_snapshot: bool = False) -> None:
         logger.debug("Could not remove skills prompt snapshot: %s", e)
 
 
-def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
-    """mtime/size manifest of every SKILL.md and DESCRIPTION.md; only the ACTIVE org mirror participates, and
+def _build_skills_manifest(skills_dir: Path) -> dict[str, list]:
+    """Content-aware mtime/size manifest of every SKILL.md and DESCRIPTION.md; only the ACTIVE org mirror participates, and
     the ``.active_org`` marker is included so switching/leaving an org invalidates the snapshot by itself."""
-    manifest: dict[str, list[int]] = {}
+    manifest: dict[str, list] = {}
     skills_dir_str = str(skills_dir)
     prefix_len = len(os.path.join(skills_dir_str, ""))
     active_org = read_active_org_id(skills_dir)
@@ -1114,10 +1116,22 @@ def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
             try:
                 if filename in files:
                     st = os.stat(path)
-                    manifest[path[prefix_len:]] = [st.st_mtime_ns, st.st_size]
+                    digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+                    manifest[path[prefix_len:]] = [st.st_mtime_ns, st.st_size, digest]
             except OSError:
                 pass
     return manifest
+
+
+def _skills_manifest_key(skills_dir: Path) -> tuple:
+    """Content-aware cache key for skill metadata files.
+
+    The prompt cache is process-local, so checking only its arguments is not enough:
+    an in-place SKILL.md edit must invalidate an already rendered index.  Keep this
+    check metadata-only; parsing remains on the cache miss path.
+    """
+    manifest = _build_skills_manifest(skills_dir)
+    return tuple(sorted((path, *values) for path, values in manifest.items()))
 
 
 def _load_skills_snapshot(skills_dir: Path) -> Optional[dict]:
@@ -1158,10 +1172,15 @@ def _build_snapshot_entry(skill_file: Path, skills_dir: Path, frontmatter: dict,
     return entry
 
 
+def _full_skill_description(frontmatter: dict) -> str:
+    value = frontmatter.get("description", "")
+    return str(value).strip().strip("'\"") if value else ""
+
+
 def _parse_skill_file(skill_file: Path) -> tuple[bool, dict, str]:
     """Read a SKILL.md once -> (is_compatible, frontmatter, description); errors yield (True, {}, "")."""
     try:
-        frontmatter, _ = parse_frontmatter(skill_file.read_text(encoding="utf-8"))
+        frontmatter, _ = load_skill_metadata(skill_file)
         # Host-platform / runtime-environment gates are offer-time only; explicit loads bypass them.
         if not skill_matches_platform(frontmatter) or not skill_matches_environment(frontmatter):
             return False, frontmatter, ""
@@ -1222,6 +1241,9 @@ def build_skills_system_prompt(
     else:
         skills_dir = get_skills_dir()
     try:
+        index_mode = str((_config_readonly("skills").get("skills", {}) or {}).get("index_mode", "compact")).strip().lower()
+        if index_mode not in {"compact", "full"}:
+            index_mode = "compact"
         external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
         # Trusted project-local dirs — highest-precedence tier; cwd/trust are session-stable, so byte-stable.
         from agent.skill_utils import get_project_skills_dirs
@@ -1229,7 +1251,8 @@ def build_skills_system_prompt(
         if not skills_dir.exists() and not external_dirs and not project_dirs:
             return ""
         return _build_skills_system_prompt_inner(
-            skills_dir, external_dirs, available_tools, available_toolsets, compact_categories, project_dirs)
+            skills_dir, external_dirs, available_tools, available_toolsets, compact_categories, project_dirs,
+            index_mode=index_mode)
     finally:
         if _home_token is not None:
             reset_hermes_home_override(_home_token)
@@ -1261,12 +1284,15 @@ def _collect_extra_skills(
     for skill_file in skill_files:
         try:
             is_compatible, frontmatter, desc = _parse_skill_file(skill_file)
-            entry = _build_snapshot_entry(skill_file, root, frontmatter, desc) if is_compatible else None
+            entry = _build_snapshot_entry(
+                skill_file, root, frontmatter, _full_skill_description(frontmatter)
+            ) if is_compatible else None
             fm_name = entry["frontmatter_name"] if entry else ""
             if not entry or fm_name in claimed or hides(fm_name, entry["skill_name"], extract_skill_conditions(frontmatter)):
                 continue
             claimed.add(fm_name)
-            skills_by_category.setdefault(entry["category"], []).append((fm_name, f"{desc_prefix}{entry['description']}".strip()))
+            skills_by_category.setdefault(entry["category"], []).append((
+                fm_name, f"{desc_prefix}{entry['description']}".strip()))
         except Exception as e:
             logger.debug(log_fmt, skill_file, e)
 
@@ -1290,7 +1316,8 @@ def _label_visible_entries(visible_entries: list[dict], skills_by_category: dict
 
 def _render_skills_index(
     skills_by_category: dict[str, list[tuple[str, str]]], category_descriptions: dict[str, str],
-    compact_categories: "frozenset[str] | None", available_tools: "set[str] | None",
+    compact_categories: "frozenset[str] | None", available_tools: "set[str] | None", *,
+    index_mode: str = "full",
 ) -> str:
     """Render the ## Skills block; "" when there is nothing to list."""
     if not skills_by_category:
@@ -1303,8 +1330,6 @@ def _render_skills_index(
         "context, so their descriptions are omitted — the skills work "
         "normally and load with skill_view(name) as usual.)"
     ) if demoted else ""
-    # Don't name web_search when the session has no web tools (dangling reference).
-    _basic_tools = "terminal" if available_tools is not None and "web_search" not in available_tools else "web_search or terminal"
     index_lines = []
     for category in sorted(skills_by_category):
         entries = skills_by_category[category]
@@ -1317,23 +1342,23 @@ def _render_skills_index(
         for name, desc in sorted(entries, key=lambda x: x[0]):  # stable: first entry per name wins
             if name not in seen:
                 seen.add(name)
+                if index_mode == "compact" and len(desc) > 60:
+                    desc = desc[:57].rsplit(" ", 1)[0].rstrip(" ,;:") + "..."
                 index_lines.append(f"    - {name}: {desc}" if desc else f"    - {name}")
+    instruction = (
+        "Relevant skills are available below; load a matching skill with skill_view(name).\n"
+        if index_mode == "compact" else
+        "Before replying, scan the skills below. If a skill matches or is even partially relevant to your task, "
+        "you MUST load it with skill_view(name) and follow its instructions.\n"
+    )
     return (
         "## Skills\n"
-        "Before replying, scan the skills below. If a skill matches or is even partially relevant to your "
-        "task, you MUST load it with skill_view(name) and follow its instructions. Err on the side of "
-        "loading — it is always better to have context you don't need than to miss critical steps, pitfalls, "
-        "or established workflows. Skills contain specialized knowledge — API endpoints, tool-specific "
-        "commands, and proven workflows that outperform general-purpose approaches. Load the skill "
-        f"even if you think you could handle the task with basic tools like {_basic_tools}. "
-        "Skills also encode the user's preferred approach, conventions, and quality standards for tasks like "
-        "code review, planning, and testing — load them even for tasks you already know how to do, because "
-        "the skill defines how it should be done here.\n"
-        "If a skill has issues, fix it with skill_manage(action='patch').\n"
-        "After difficult/iterative tasks, offer to save as a skill. If a skill you loaded was missing steps, "
-        "had wrong commands, or needed pitfalls you discovered, update it before finishing.\n"
-        "\n"
-        "<available_skills>\n"
+        + instruction
+        + "If a skill has issues, fix it with skill_manage(action='patch').\n"
+        + "After difficult/iterative tasks, offer to save as a skill. If a skill you loaded was missing steps, "
+        + "had wrong commands, or needed pitfalls you discovered, update it before finishing.\n"
+        + "\n"
+        + "<available_skills>\n"
         + "\n".join(index_lines) + "\n"
         "</available_skills>\n\n"
         "Only proceed without loading a skill if genuinely none are relevant to the task."
@@ -1344,7 +1369,7 @@ def _render_skills_index(
 def _build_skills_system_prompt_inner(
     skills_dir: "Path", external_dirs: "list[Path]", available_tools: "set[str] | None",
     available_toolsets: "set[str] | None", compact_categories: "frozenset[str] | None",
-    project_dirs: "list[Path] | None" = None,
+    project_dirs: "list[Path] | None" = None, *, index_mode: str = "full",
 ) -> str:
     # The resolved platform is part of the key: per-platform disabled-skill lists need distinct cache entries.
     _platform_hint = _current_session_platform_hint()
@@ -1355,6 +1380,8 @@ def _build_skills_system_prompt_inner(
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())),
+        index_mode,
+        tuple(_skills_manifest_key(directory) for directory in (skills_dir, *external_dirs, *project_dirs)),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1379,7 +1406,8 @@ def _build_skills_system_prompt_inner(
         candidates = []
         for skill_file in iter_skill_index_files(skills_dir, "SKILL.md"):
             is_compatible, frontmatter, desc = _parse_skill_file(skill_file)
-            candidates.append((_build_snapshot_entry(skill_file, skills_dir, frontmatter, desc), is_compatible))
+            candidates.append((_build_snapshot_entry(
+                skill_file, skills_dir, frontmatter, _full_skill_description(frontmatter)), is_compatible))
     visible_entries: list[dict] = [
         entry for entry, is_compatible in candidates
         if is_compatible and not hides(_entry_name(entry), entry.get("skill_name") or "", entry.get("conditions") or {})
@@ -1412,7 +1440,8 @@ def _build_skills_system_prompt_inner(
         for cat, cat_desc in _read_category_descriptions(ext_dir, "Could not read external skill description %s: %s").items():
             category_descriptions.setdefault(cat, cat_desc)
 
-    result = _render_skills_index(skills_by_category, category_descriptions, compact_categories, available_tools)
+    result = _render_skills_index(
+        skills_by_category, category_descriptions, compact_categories, available_tools, index_mode=index_mode)
     with _SKILLS_PROMPT_CACHE_LOCK:
         _SKILLS_PROMPT_CACHE[cache_key] = result
         _SKILLS_PROMPT_CACHE.move_to_end(cache_key)
@@ -1521,7 +1550,9 @@ def _agents_md_directory_chain(cwd_path: Path) -> list[Path]:
     return [root] + [root.joinpath(*parts[: i + 1]) for i in range(len(parts))]
 
 
-def _load_agents_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
+def _load_agents_md(
+    cwd_path: Path, context_length: Optional[int] = None, *, mode: str = "full", allow_agents: bool = False,
+) -> str:
     """AGENTS.md — merged directory chain from git root down to cwd.
 
     Per directory the first of ``AGENTS.override.md`` / ``AGENTS.md`` / ``agents.md`` wins (a gitignored
@@ -1535,7 +1566,20 @@ def _load_agents_md(cwd_path: Path, context_length: Optional[int] = None) -> str
     files) is deduplicated. With a single match — the common case, and always the case outside a git repo —
     output is identical to the historical single-file behavior.
     """
+    mode = str(mode or "full").strip().lower()
+    if mode == "opt-in" and not allow_agents:
+        return ""
     cwd_resolved = cwd_path.resolve()
+    if mode == "selective":
+        git_root = _find_git_root(cwd_resolved)
+        if git_root is not None and git_root.resolve() == cwd_resolved:
+            return ""
+        for name in ("AGENTS.override.md", "AGENTS.md", "agents.md"):
+            candidate = cwd_resolved / name
+            content = _read_context_file(candidate)
+            if content:
+                return _context_section(content, name, name, candidate, context_length)
+        return ""
     sections: list[str] = []
     seen_content: set = set()
     for directory in _agents_md_directory_chain(cwd_resolved):
@@ -1584,6 +1628,7 @@ def _load_cursorrules(cwd_path: Path, context_length: Optional[int] = None) -> s
 def build_context_files_prompt(
     cwd: Optional[str] = None, skip_soul: bool = False, context_length: Optional[int] = None,
     allow_install_tree_fallback: bool = False, home_override: "Path | None" = None,
+    agents_mode: str = "full", allow_agents: bool = False,
 ) -> str:
     """Discover and load context files for the system prompt (each capped, see ``_get_context_file_max_chars``).
 
@@ -1606,7 +1651,9 @@ def build_context_files_prompt(
         )
         sections = []
     else:
-        sections = [_load_hermes_md(cwd_path, context_length) or _load_agents_md(cwd_path, context_length)
+        project_context = "" if str(agents_mode).strip().lower() == "selective" else _load_hermes_md(cwd_path, context_length)
+        sections = [project_context or _load_agents_md(
+                        cwd_path, context_length, mode=agents_mode, allow_agents=allow_agents)
                     or _load_claude_md(cwd_path, context_length) or _load_cursorrules(cwd_path, context_length)]
     if not skip_soul:
         sections.append(load_soul_md(context_length, home_override=home_override))

@@ -392,13 +392,9 @@ def _clip_description(text: str, cap: int = 500) -> str:
 def _shared_tool_record(entry: CatalogEntry) -> Dict[str, Any]:
     """One record for the shared ``tools`` map (per-query groups carry names only);
     ``required`` lets the model attempt a trivial call without a ``tool_describe`` round-trip."""
-    try:
-        required = entry.schema["function"]["parameters"]["required"]
-    except (TypeError, KeyError, AttributeError):
-        required = []
-    return {"source": entry.source, "source_name": entry.source_name,
+    return {"source": entry.source, "source_name": entry.source_name, "toolset": entry.source_name,
             "description": _clip_description(entry.description or ""),
-            "required": [r[:64] for r in (required if isinstance(required, list) else [])
+            "required": [r[:64] for r in entry.required
                          if isinstance(r, str)][:32]}
 
 
@@ -496,6 +492,18 @@ def dispatch_tool_describe(args: Dict[str, Any], *, current_tool_defs: List[Dict
     for name in names:
         fn = by_name.get(name)
         remote_fn = remote_schemas.get(name)
+        if fn is not None and not fn.get("parameters"):
+            # Metadata-only deferred definitions intentionally omit the expensive schema.
+            # Materialize exactly the names the model selected, one registry lookup at a time.
+            loaded = _registry_entry(name)
+            if loaded is not None:
+                try:
+                    from tools.registry import registry
+                    selected = registry.get_definitions({name}, quiet=True)
+                    if selected:
+                        fn = _fn(selected[0])
+                except Exception:
+                    pass
         if fn is not None:
             tools[name] = {"description": fn.get("description", ""),
                            "parameters": fn.get("parameters", {})}
@@ -586,7 +594,10 @@ from typing import Literal  # noqa: F401,E402
 import copy  # noqa: F401,E402
 from dataclasses import field  # noqa: F401,E402
 import re  # noqa: F401,E402
-import snowballstemmer  # noqa: F401,E402
+try:
+    import snowballstemmer  # noqa: F401,E402
+except ImportError:
+    snowballstemmer = None  # noqa: F401,E402
 import threading  # noqa: F401,E402
 
 def build_catalog_listing(

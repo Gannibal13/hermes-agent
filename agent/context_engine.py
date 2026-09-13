@@ -9,6 +9,7 @@ should_compress() / compress() -> on_session_end() at real session boundaries on
 """
 
 import json
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
@@ -19,6 +20,8 @@ MEMORY_CONTEXT_MAX_CHARS = 6_000
 _MEMORY_CONTEXT_HEAD_CHARS = 4_000
 _MEMORY_CONTEXT_TAIL_CHARS = 1_500
 _MEMORY_CONTEXT_TRUNCATION_MARKER = "\n...[memory provider context truncated]...\n"
+_SELECTION_NOOP_BASE_BACKOFF_SECONDS = 0.25
+_SELECTION_NOOP_MAX_BACKOFF_SECONDS = 8.0
 
 
 def sanitize_memory_context(memory_context: str) -> str:
@@ -27,6 +30,35 @@ def sanitize_memory_context(memory_context: str) -> str:
     if len(sanitized) <= MEMORY_CONTEXT_MAX_CHARS:
         return sanitized
     return sanitized[:_MEMORY_CONTEXT_HEAD_CHARS] + _MEMORY_CONTEXT_TRUNCATION_MARKER + sanitized[-_MEMORY_CONTEXT_TAIL_CHARS:]
+
+
+def selection_preserves_current_human_task(selected: Any, incoming: Any) -> bool:
+    """Reject a request projection that loses or rewrites the current human ask."""
+    if not isinstance(incoming, dict) or incoming.get("role") != "user":
+        return True
+    return any(
+        isinstance(message, dict)
+        and message.get("role") == "user"
+        and message.get("content") == incoming.get("content")
+        for message in selected
+    )
+
+
+def context_selection_backoff_active(engine: Any) -> bool:
+    return time.monotonic() < float(getattr(engine, "_selection_noop_backoff_until", 0.0) or 0.0)
+
+
+def record_context_selection_result(engine: Any, *, no_op: bool) -> None:
+    """Bound repeated external-engine no-ops without delaying a useful selection."""
+    if not no_op:
+        engine._selection_noop_streak = 0
+        engine._selection_noop_backoff_until = 0.0
+        return
+    streak = int(getattr(engine, "_selection_noop_streak", 0) or 0) + 1
+    engine._selection_noop_streak = streak
+    delay = min(_SELECTION_NOOP_MAX_BACKOFF_SECONDS,
+                _SELECTION_NOOP_BASE_BACKOFF_SECONDS * (2 ** min(streak - 1, 5)))
+    engine._selection_noop_backoff_until = time.monotonic() + delay
 
 
 def automatic_compaction_status_message(engine: Any, *, phase: str, default_message: str, **context: Any) -> str | None:
