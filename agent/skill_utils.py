@@ -20,6 +20,7 @@ _SKILL_METADATA_CACHE: Dict[
     Tuple[Dict[str, Any], str],
 ] = {}
 _SKILL_METADATA_CACHE_LOCK = threading.Lock()
+_SKILL_METADATA_CACHE_GENERATION = 0
 
 PLATFORM_MAP = {"macos": "darwin", "linux": "linux", "windows": "win32"}
 
@@ -156,13 +157,17 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
 
 
 def clear_skill_metadata_cache() -> None:
-    """Clear the shared parsed-metadata cache after bulk skill changes."""
+    """Clear the cache and prevent in-flight readers from repopulating it."""
+    global _SKILL_METADATA_CACHE_GENERATION
     with _SKILL_METADATA_CACHE_LOCK:
         _SKILL_METADATA_CACHE.clear()
+        _SKILL_METADATA_CACHE_GENERATION += 1
 
 
 def load_skill_metadata(skill_file: Path, *, max_chars: Optional[int] = None) -> Tuple[Dict[str, Any], str]:
     """Read and parse a skill file once per content fingerprint and requested prefix size."""
+    with _SKILL_METADATA_CACHE_LOCK:
+        generation = _SKILL_METADATA_CACHE_GENERATION
     path = Path(skill_file)
     try:
         path.stat()
@@ -172,13 +177,18 @@ def load_skill_metadata(skill_file: Path, *, max_chars: Optional[int] = None) ->
     fingerprint = hashlib.sha256(raw).hexdigest()
     key = (str(path.resolve()), fingerprint, max_chars)
     with _SKILL_METADATA_CACHE_LOCK:
-        cached = _SKILL_METADATA_CACHE.get(key)
+        cached = (
+            _SKILL_METADATA_CACHE.get(key)
+            if generation == _SKILL_METADATA_CACHE_GENERATION
+            else None
+        )
     if cached is not None:
         return dict(cached[0]), cached[1]
-    text = path.read_text(encoding="utf-8")
+    text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     result = parse_frontmatter(text if max_chars is None else text[:max_chars])
     with _SKILL_METADATA_CACHE_LOCK:
-        _SKILL_METADATA_CACHE[key] = result
+        if generation == _SKILL_METADATA_CACHE_GENERATION:
+            _SKILL_METADATA_CACHE[key] = result
     return dict(result[0]), result[1]
 
 
