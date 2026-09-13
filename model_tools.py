@@ -512,6 +512,7 @@ def _compute_tool_definitions(enabled_toolsets: Optional[List[str]] = None, disa
             deferred_tools = [t for t in metadata_tools if t["function"]["name"] in deferred_names]
         else:
             deferred_tools = []
+            filtered_tools = _apply_dynamic_schemas(registry.get_definitions(tools_to_include, quiet=quiet_mode))
     global _last_resolved_tool_names
     _last_resolved_tool_names = [t["function"]["name"] for t in filtered_tools]
 
