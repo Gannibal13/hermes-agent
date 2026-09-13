@@ -266,6 +266,9 @@ class TestParseSkillFile:
             raise OSError("read exploded")
 
         monkeypatch.setattr(type(skill_file), "read_text", boom)
+        # load_skill_metadata reads raw bytes for its content-hash cache; the
+        # failure path must hold on that read route as well.
+        monkeypatch.setattr(type(skill_file), "read_bytes", boom)
         with caplog.at_level(logging.DEBUG, logger="agent.prompt_builder"):
             is_compat, frontmatter, desc = _parse_skill_file(skill_file)
 
