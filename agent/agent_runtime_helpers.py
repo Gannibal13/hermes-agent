@@ -1111,6 +1111,7 @@ def restore_primary_runtime(agent) -> bool:
         # Reset the index even without activation: a failed _try_activate_fallback() can strand
         # _fallback_index past the chain end and silently block future fallbacks.
         agent._fallback_index = 0
+        agent._global_router_attempted_routes = set()
         return False
     # Reset the chain index even when no fallback was activated this turn. Without this, a turn where
     # _try_activate_fallback() was called but returned False (chain exhausted or provider not configured)
@@ -1178,6 +1179,7 @@ def restore_primary_runtime(agent) -> bool:
             agent.reasoning_config = dict(saved_reasoning)
         agent._fallback_activated = False
         agent._fallback_index = 0
+        agent._global_router_attempted_routes = set()
         agent._rate_limit_backoff_count = 0
         # Reset the stale-call circuit breaker: its streak measured the fallback provider.
         from agent.chat_completion_helpers import _reset_stale_streak, rewrite_prompt_model_identity

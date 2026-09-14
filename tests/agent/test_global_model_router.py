@@ -784,3 +784,9 @@ class TestQuotaAwareRouting:
         lease = router.acquire_lease("p", "m", "goal-1")
         router.report_failure(lease.lease_id, "rate_limit_429", retry_after_seconds=999999)
         assert router.get_cooldown("p", "m") <= 86400
+
+    def test_decide_next_excludes_execution_local_attempts(self, tmp_path):
+        router = GlobalModelRouter(store_path=tmp_path / "test.db")
+        routes = [Route("free", "small", 0.0), Route("paid", "medium", 0.01)]
+        decision = router.decide_next(routes, TaskClass.CHEAP, {("free", "small")})
+        assert (decision.route.provider, decision.route.model) == ("paid", "medium")

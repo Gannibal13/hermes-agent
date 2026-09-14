@@ -136,6 +136,9 @@ class Route:
     capabilities: frozenset[Capability] = field(default_factory=frozenset)
     context_window: ContextWindow = field(default_factory=ContextWindow)
     quota: QuotaState = field(default_factory=QuotaState)
+    # Stable caller-provided tie-breaker; production pool leaves this at zero,
+    # while an ordered configured fallback list can preserve its explicit order.
+    priority: int = 0
 
 
 @dataclass(frozen=True)
@@ -419,11 +422,11 @@ class GlobalModelRouter:
             capabilities=route.capabilities,
             context_window=route.context_window,
             quota=route.quota,
+            priority=route.priority,
         )
 
     # ------------------------------------------------------------------
     # Ranking
-    # ------------------------------------------------------------------
 
     def rank_routes(
         self,
@@ -456,7 +459,7 @@ class GlobalModelRouter:
             pressure = r.quota.pressure
             scarce = int(pressure is not None and pressure >= 0.90)
             return (scarce, r.cost_per_1k, pressure if pressure is not None else 0.0,
-                    r.provider, r.model)
+                    r.priority, r.provider, r.model)
 
         filtered.sort(key=ranking_key)
         return filtered
@@ -529,6 +532,26 @@ class GlobalModelRouter:
         """Reject terminal health states without creating a second health system."""
         state = self.get_route_state(route.provider, route.model)
         return state not in {"disabled", "offline", "auth_failed", "unconfigured"}
+
+    def decide_next(self, routes: list[Route], task_class: TaskClass,
+                    attempted_routes: set[tuple[str, str]] | None = None,
+                    min_context_tokens: int = 0) -> Decision:
+        """Choose the next route for one execution chain, excluding attempted routes.
+
+        This is the continuation entry point: callers may perform client/transport
+        setup, but they must not rank fallback candidates themselves.
+        """
+        attempted = {
+            (_canonical_provider(p), _canonical_model(m))
+            for p, m in (attempted_routes or set())
+        }
+        remaining = [
+            r for r in routes
+            if (_canonical_provider(r.provider), _canonical_model(r.model)) not in attempted
+        ]
+        if not remaining:
+            return Decision(route=None, task_class=task_class, reason="execution chain exhausted")
+        return self.route(remaining, task_class, min_context_tokens)
 
     # ------------------------------------------------------------------
     # Lease management (atomic)
