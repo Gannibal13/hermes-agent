@@ -1828,6 +1828,60 @@ def _buffer_fallback_notice(agent, notice: str) -> None:
         agent._pending_fallback_notice = [str(pending), notice] if pending else [notice]
 
 
+def _global_router_fallback_entries(agent) -> list[dict[str, Any]]:
+    """Return the configured model pool without making inference/API calls.
+
+    ``_fallback_chain`` is a compatibility transport chain, not the production router's
+    complete candidate pool.  Include explicitly configured provider models and custom
+    provider models, while keeping the legacy entries (including their per-entry hints).
+    """
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(provider: Any, model: Any, source: Optional[dict[str, Any]] = None) -> None:
+        provider_s, model_s = str(provider or "").strip(), str(model or "").strip()
+        if not provider_s or not model_s:
+            return
+        key = (provider_s.lower(), model_s.lower())
+        if key in seen:
+            return
+        seen.add(key)
+        entry = dict(source or {})
+        entry.update(provider=provider_s, model=model_s)
+        entries.append(entry)
+
+    add(getattr(agent, "provider", ""), getattr(agent, "model", ""))
+    for entry in getattr(agent, "_fallback_chain", []) or []:
+        if isinstance(entry, dict):
+            add(entry.get("provider"), entry.get("model"), entry)
+
+    try:
+        from hermes_cli.config import load_config_readonly
+        config = load_config_readonly() or {}
+        for provider, spec in (config.get("providers") or {}).items():
+            if isinstance(spec, dict):
+                models = spec.get("models") or []
+                if isinstance(models, str):
+                    models = [models]
+                for model in models:
+                    add(provider, model, {"base_url": spec.get("base_url")})
+        custom = config.get("custom_providers") or getattr(agent, "_custom_providers", []) or []
+        for spec in custom:
+            if not isinstance(spec, dict):
+                continue
+            provider = spec.get("provider") or (
+                f"custom:{spec.get('name')}" if spec.get("name") else ""
+            )
+            models = spec.get("models") or [spec.get("model")]
+            if isinstance(models, dict):
+                models = list(models)
+            for model in models:
+                add(provider, model, {"base_url": spec.get("base_url"), "api_key": spec.get("api_key")})
+    except Exception:
+        logger.debug("Could not enumerate configured model pool", exc_info=True)
+    return entries
+
+
 def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool:
     """Switch to the next fallback model/provider in the chain; False when exhausted. Swaps client,
     model slug and provider in place so the retry loop continues on the new backend; client
@@ -1839,20 +1893,36 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     router = getattr(agent, "_global_model_router", None)
     selected_key = None
     if router is not None:
-        from agent.global_model_router import Capability, GlobalModelRouter, Route, TaskClass
+        from agent.global_model_router import Capability, ContextWindow, GlobalModelRouter, Route, TaskClass
         if isinstance(router, GlobalModelRouter):
             task_class = getattr(agent, "_global_router_task_class", None) or TaskClass.NORMAL
             if isinstance(task_class, str):
                 task_class = TaskClass(task_class) if task_class in {x.value for x in TaskClass} else TaskClass.NORMAL
+            pool_entries = _global_router_fallback_entries(agent)
             routes = []
-            for entry in agent._fallback_chain:
+            for entry in pool_entries:
                 caps = frozenset(
                     Capability(c) for c in (entry.get("capabilities") or [])
                     if c in {x.value for x in Capability}
                 )
+                context_window = int(entry.get("context_window") or 0)
+                try:
+                    from agent.models_dev import get_model_info
+                    info = get_model_info(str(entry.get("provider")), str(entry.get("model")), allow_network=False)
+                    if info is not None:
+                        context_window = int(info.context_window or context_window or 0)
+                        if not entry.get("cost_per_1k"):
+                            entry["cost_per_1k"] = (float(info.cost_input) + float(info.cost_output)) / 2000.0
+                        if info.reasoning:
+                            caps = caps | frozenset({Capability.REASONING})
+                        if info.tool_call:
+                            caps = caps | frozenset({Capability.TOOLS})
+                except Exception:
+                    logger.debug("Model metadata unavailable for router route", exc_info=True)
                 routes.append(Route(
                     provider=str(entry.get("provider") or ""), model=str(entry.get("model") or ""),
                     cost_per_1k=float(entry.get("cost_per_1k") or 0.0), capabilities=caps,
+                    context_window=ContextWindow(context_window) if context_window > 0 else ContextWindow(),
                 ))
             attempted = set(getattr(agent, "_global_router_attempted_routes", set()) or set())
             attempted.add((str(getattr(agent, "provider", "") or ""), str(getattr(agent, "model", "") or "")))
@@ -1863,10 +1933,22 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             agent._global_router_attempted_routes = attempted
         else:
             router = None
-    while True:
-        if agent._fallback_index >= len(agent._fallback_chain):
+    candidate_entries = pool_entries if selected_key is not None else agent._fallback_chain
+    if selected_key is not None:
+        selected_index = next(
+            (i for i, entry in enumerate(candidate_entries)
+             if (str(entry.get("provider") or "").strip().lower(),
+                 str(entry.get("model") or "").strip().lower()) ==
+             (str(selected_key[0]).strip().lower(), str(selected_key[1]).strip().lower())),
+            None,
+        )
+        if selected_index is None:
             return _fallback_chain_exhausted(agent, reason)
-        fb = agent._fallback_chain[agent._fallback_index]
+        agent._fallback_index = selected_index
+    while True:
+        if agent._fallback_index >= len(candidate_entries):
+            return _fallback_chain_exhausted(agent, reason)
+        fb = candidate_entries[agent._fallback_index]
         agent._fallback_index += 1
         fb_key = _fallback_entry_key(fb)
         if getattr(agent, "_unavailable_fallback_keys", None) is None:
