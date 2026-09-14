@@ -1073,4 +1073,5 @@ def attach_agent_router(agent: Any, *, store_path: Path | str | None = None) -> 
     provider, model = getattr(agent, "provider", None), getattr(agent, "model", None)
     if provider and model:
         router.set_route_state(str(provider), str(model), "active")
+    setattr(agent, "_global_router_pool_enabled", bool(provider and model))
     return router

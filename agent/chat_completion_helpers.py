@@ -1855,6 +1855,19 @@ def _global_router_fallback_entries(agent) -> list[dict[str, Any]]:
         if isinstance(entry, dict):
             add(entry.get("provider"), entry.get("model"), entry)
 
+    # A fallback-only/test agent has no resolved primary route; do not leak the
+    # process-wide config pool into that compatibility chain. Live agents always
+    # have a resolved provider+model, so production pool construction remains active.
+    has_primary_route = bool(getattr(agent, "_global_router_pool_enabled", bool(
+        str(getattr(agent, "provider", "") or "").strip() and
+        str(getattr(agent, "model", "") or "").strip()
+    ))) and bool(
+        str(getattr(agent, "provider", "") or "").strip() and
+        str(getattr(agent, "model", "") or "").strip()
+    )
+    if not has_primary_route:
+        return entries
+
     try:
         from hermes_cli.config import load_config_readonly
         config = load_config_readonly() or {}
@@ -1937,7 +1950,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
 
             selected_key = _next_router_key()
             if selected_key is None:
-                return False
+                return _fallback_chain_exhausted(agent, reason)
             agent._global_router_attempted_routes = attempted
         else:
             router = None
@@ -1968,6 +1981,9 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             continue
         if _should_skip_fallback_candidate(agent, fb, fb_key, fb_provider, fb_model, unavailable):
             continue
+        if router is not None:
+            attempted.add((fb_provider, fb_model.lower()))
+            agent._global_router_attempted_routes = attempted
 
         try:
             from agent.auxiliary_client import resolve_provider_client
@@ -2053,6 +2069,8 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             from agent.native_compaction import resolve_native_compaction_capabilities
             agent.runtime_capabilities = resolve_native_compaction_capabilities(
                 model=agent.model, base_url=agent.base_url, provider=fb_provider, is_codex_backend=fb_provider == "openai-codex")
+            attempted.add((fb_provider, fb_model.lower()))
+            agent._global_router_attempted_routes = attempted
             return True
         except Exception as e:
             if fb_provider == "nous":
