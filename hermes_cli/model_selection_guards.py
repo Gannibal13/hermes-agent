@@ -36,19 +36,30 @@ class SelectionContext:
 
 def selection_context_for_agent(agent: object) -> Optional[SelectionContext]:
     """:class:`SelectionContext` from a live ``AIAgent``: the compressor's measured
-    ``last_prompt_tokens`` (what the provider billed on the latest turn), else the session prompt
-    counter. ``None`` when no live size is known — the guard then stays silent rather than guess."""
+    ``last_prompt_tokens`` (what the provider billed on the latest turn), else a
+    bounded local estimate. The session cumulative counter is NEVER used — it is
+    a running SUM across every turn and would read ~5.7M tokens on a 87.4k
+    session, which is not context. When no live size is known, the returned
+    context is explicit UNKNOWN so the guard can require confirmation."""
     if agent is None:
         return None
     try:
         cc = getattr(agent, "context_compressor", None)
         tokens = int(getattr(cc, "last_prompt_tokens", 0) or 0) if cc else 0
         if tokens <= 0:
-            tokens = int(getattr(agent, "session_prompt_tokens", 0) or 0)
+            # No measured size. Fall back to a bounded local estimate of the
+            # current conversation only — never to the cumulative session counter.
+            from agent.context_breakdown import compute_session_context_breakdown
+            messages = getattr(agent, "conversation_history", None) or []
+            bd = compute_session_context_breakdown(agent, messages)
+            tokens = int(bd.get("context_used") or 0)
     except Exception:
         tokens = 0
     if tokens <= 0:
-        return None
+        # UNKNOWN: we know there is a live agent but cannot determine its context
+        # size.  Return an explicit UNKNOWN context (not None) so the guard can
+        # default to "confirm required" rather than silently passing.
+        return SelectionContext(context_tokens=None, current_model=getattr(agent, "model", "") or None)
     return SelectionContext(context_tokens=tokens, current_model=getattr(agent, "model", "") or None)
 
 
@@ -103,15 +114,29 @@ def _context_cache_threshold() -> int:
 def _context_cache_guard(
     model_name: str, provider: Optional[str], base_url: Optional[str], api_key: Optional[str],
     model_info: Optional[ModelInfo], ctx: Optional[SelectionContext] = None) -> Optional[SelectionWarning]:
-    """Confirm a mid-session switch that abandons a large cached context. Fires only when the surface
-    supplied live facts showing the active context at/above the threshold; smaller sessions, sessions
-    with no measured size and same-model re-selects (cache stays warm) are silent."""
-    if ctx is None or not ctx.context_tokens:
+    """Confirm a mid-session switch that abandons a large cached context.  Fires when:
+    - the surface supplied a measured/estimated size ≥ threshold, OR
+    - the surface supplied an UNKNOWN context (size could not be determined).
+
+    Sessions with no measured size and same-model re-selects (cache stays warm) are always silent."""
+    if ctx is None:
         return None
     target = (model_name or "").strip()
     current = (ctx.current_model or "").strip()
     if not target or (current and target == current):
         return None
+    # UNKNOWN context: context_tokens is None — we cannot tell whether the
+    # session is large, so default to "confirm required" rather than silently
+    # passing a potentially large uncached re-read.
+    if ctx.context_tokens is None:
+        message = (
+            "Context size could not be determined at switch time.\n"
+            "If this session has a large conversation, switching will trigger "
+            "a full uncached re-read — a one-time full-price input cost.\n\n"
+            "Confirm to proceed.")
+        return SelectionWarning(
+            kind="context_cache", title="Context Size Unknown",
+            model=target, provider=(provider or "").strip(), message=message)
     threshold = _context_cache_threshold()
     tokens = int(ctx.context_tokens)
     if threshold <= 0 or tokens < threshold:

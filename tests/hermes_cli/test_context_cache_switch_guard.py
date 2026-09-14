@@ -1,8 +1,8 @@
 """Context-cache model-switch guard.
 
 A mid-session model switch abandons the provider prompt cache, so the first call after the switch
-re-reads the whole conversation at full input price. The guard asks for confirmation only when the
-live session exceeds a configurable token threshold.
+re-reads the whole conversation at full input price. The guard asks for confirmation when the
+live session exceeds a configurable token threshold, or when its size is explicitly UNKNOWN.
 """
 
 from unittest.mock import patch
@@ -58,7 +58,7 @@ class TestContextCacheGuard:
 
 
 class TestSelectionContextForAgent:
-    def test_measured_tokens_then_session_counter_fallback(self):
+    def test_measured_tokens_then_unknown_without_cumulative_fallback(self):
         class _CC:
             last_prompt_tokens = 123_456
 
@@ -73,13 +73,17 @@ class TestSelectionContextForAgent:
 
         ctx = selection_context_for_agent(_Measured())
         assert (ctx.context_tokens, ctx.current_model) == (123_456, "current/model")
-        assert selection_context_for_agent(_Fallback()).context_tokens == 42_000
+        fallback = selection_context_for_agent(_Fallback())
+        assert fallback is not None
+        assert fallback.context_tokens is None
 
-    def test_no_agent_or_empty_session_returns_none(self):
+    def test_no_agent_or_empty_session_is_explicit_unknown(self):
         class _Empty:
             context_compressor = None
             session_prompt_tokens = 0
             model = "current/model"
 
         assert selection_context_for_agent(None) is None
-        assert selection_context_for_agent(_Empty()) is None
+        unknown = selection_context_for_agent(_Empty())
+        assert unknown is not None
+        assert unknown.context_tokens is None
