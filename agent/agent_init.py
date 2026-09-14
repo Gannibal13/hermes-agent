@@ -462,6 +462,12 @@ def _finalize_routing(agent, api_mode, credential_pool):
     from hermes_cli.anon_auth import pin_model_for_route
     agent.model = pin_model_for_route(agent.provider, agent.base_url, agent.model)
 
+    # Keep quota/route telemetry attached to the already-resolved runtime.
+    # This never rewrites the established provider or credential selection.
+    with suppress(Exception):
+        from agent.global_model_router import attach_agent_router
+        attach_agent_router(agent)
+
     # Auto-upgrade to Responses for GPT-5.x-style models and direct OpenAI URLs, unless
     # api_mode was explicit, the runtime is ACP (`acp://` clients route themselves, no
     # Responses surface) or Azure OpenAI (gpt-5.x on /chat/completions only). Provider
