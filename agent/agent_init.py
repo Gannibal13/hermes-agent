@@ -467,6 +467,9 @@ def _finalize_routing(agent, api_mode, credential_pool):
     with suppress(Exception):
         from agent.global_model_router import attach_agent_router
         attach_agent_router(agent)
+    with suppress(Exception):
+        from agent.coding_quality_controller import attach_quality_controller
+        attach_quality_controller(agent)
 
     # Auto-upgrade to Responses for GPT-5.x-style models and direct OpenAI URLs, unless
     # api_mode was explicit, the runtime is ACP (`acp://` clients route themselves, no

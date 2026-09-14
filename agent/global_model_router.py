@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Generator, Optional, Tuple
+from typing import Any, Generator, Mapping, Optional, Tuple
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -72,6 +72,60 @@ class QuotaState:
     confidence: str = "UNKNOWN"
     source: str = "unknown"
     pressure: float | None = None
+
+
+@dataclass(frozen=True)
+class ProviderCallResult:
+    """Redacted normalized provider outcome; never contains prompt/response data."""
+    provider: str
+    model: str
+    route_id: str | None = None
+    request_id: str | None = None
+    status: str = "SUCCESS"
+    http_status: int | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0
+    retry_after: float | None = None
+    reset_at: float | None = None
+    remaining_requests: int | None = None
+    remaining_tokens: int | None = None
+    timestamp: float = field(default_factory=time.time)
+    task_id: str | None = None
+    session_id: str | None = None
+    route_source: str = "auto"
+    task_class: str | None = None
+    retry_count: int = 0
+    reason: str | None = None
+
+
+def _header(headers: Mapping[str, Any] | None, *names: str) -> Any:
+    if not headers:
+        return None
+    lowered = {str(k).lower(): v for k, v in headers.items()}
+    for name in names:
+        if name.lower() in lowered:
+            return lowered[name.lower()]
+    return None
+
+
+def _number(value: Any, cast: type = int) -> Any:
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def quota_from_headers(headers: Mapping[str, Any] | None, *, now: float | None = None) -> QuotaState:
+    """Parse common normalized rate-limit headers; absent values remain UNKNOWN."""
+    reset = _number(_header(headers, "x-ratelimit-reset", "ratelimit-reset"), float)
+    if reset is not None and reset < (now or _now_ts()):
+        reset = (now or _now_ts()) + reset
+    remaining_requests = _number(_header(headers, "x-ratelimit-remaining-requests", "ratelimit-remaining-requests"))
+    remaining_tokens = _number(_header(headers, "x-ratelimit-remaining-tokens", "ratelimit-remaining-tokens"))
+    known = remaining_requests is not None or remaining_tokens is not None or reset is not None
+    return QuotaState(remaining_requests, remaining_tokens, reset,
+                      "EXACT" if known else "UNKNOWN", "provider_header" if known else "unknown")
 
 
 @dataclass(frozen=True)
@@ -233,10 +287,22 @@ CREATE TABLE IF NOT EXISTS pin (
 );
 
 CREATE TABLE IF NOT EXISTS cooldown (
-    provider   TEXT NOT NULL,
-    model      TEXT NOT NULL,
+    provider  TEXT NOT NULL,
+    model     TEXT NOT NULL,
     expires_at REAL NOT NULL,
     PRIMARY KEY (provider, model)
+);
+
+CREATE TABLE IF NOT EXISTS provider_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp REAL NOT NULL, task_id TEXT, session_id TEXT,
+    provider TEXT NOT NULL, model TEXT NOT NULL, route_id TEXT, request_id TEXT,
+    route_source TEXT NOT NULL, task_class TEXT, status TEXT NOT NULL,
+    http_status INTEGER, input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0, cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+    retry_after REAL, reset_at REAL, remaining_requests INTEGER, remaining_tokens INTEGER,
+    quota_confidence TEXT NOT NULL, quota_source TEXT NOT NULL,
+    retry_count INTEGER NOT NULL DEFAULT 0, reason TEXT
 );
 """
 
@@ -309,6 +375,35 @@ class GlobalModelRouter:
                 conn.executescript(_SCHEMA_SQL)
         except sqlite3.OperationalError:
             pass  # concurrent init is fine; schema is idempotent
+
+    def record_provider_result(self, result: ProviderCallResult) -> None:
+        """Persist redacted call telemetry and quota provenance."""
+        known = any(x is not None for x in (result.remaining_requests, result.remaining_tokens, result.reset_at))
+        with self._db() as conn:
+            conn.execute("""INSERT INTO provider_calls
+                (timestamp,task_id,session_id,provider,model,route_id,request_id,route_source,task_class,status,http_status,
+                 input_tokens,output_tokens,cached_input_tokens,retry_after,reset_at,remaining_requests,remaining_tokens,
+                 quota_confidence,quota_source,retry_count,reason)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                result.timestamp, result.task_id, result.session_id, result.provider, result.model,
+                result.route_id, result.request_id, result.route_source, result.task_class, result.status,
+                result.http_status, result.input_tokens, result.output_tokens, result.cached_input_tokens,
+                result.retry_after, result.reset_at, result.remaining_requests, result.remaining_tokens,
+                "EXACT" if known else "UNKNOWN", "provider_header" if known else "unknown",
+                result.retry_count, result.reason))
+
+    def provider_call_ledger(self, *, provider: str | None = None, model: str | None = None,
+                             session_id: str | None = None) -> list[dict[str, Any]]:
+        """Read compact provider-call records back from persistent SQLite state."""
+        clauses, args = [], []
+        for column, value in (("provider", provider), ("model", model), ("session_id", session_id)):
+            if value is not None:
+                clauses.append(f"{column}=?")
+                args.append(value)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self._db() as conn:
+            rows = conn.execute("SELECT * FROM provider_calls" + where + " ORDER BY id", args).fetchall()
+        return [dict(row) for row in rows]
 
     # ------------------------------------------------------------------
     # Canonical helpers (public for testing)
