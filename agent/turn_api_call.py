@@ -19,6 +19,52 @@ from agent.message_metadata import append_message
 logger = logging.getLogger("agent.conversation_loop")
 
 
+def _usage_int(usage: Any, *names: str) -> int:
+    for name in names:
+        value = getattr(usage, name, None) if usage is not None else None
+        if value is not None:
+            try:
+                return max(0, int(value))
+            except (TypeError, ValueError):
+                pass
+    return 0
+
+
+def _record_router_result(agent: Any, lease: Any, *, status: str, error: Any = None,
+                         response: Any = None, task_id: Any = None, retry_count: Any = 0) -> None:
+    """Feed one redacted normalized result into the authoritative router ledger."""
+    router = getattr(agent, "_global_model_router", None)
+    if router is None or lease is None or not getattr(lease, "acquired", False):
+        return
+    from agent.global_model_router import ProviderCallResult, quota_from_headers
+    wire = response or getattr(error, "response", None)
+    headers = getattr(wire, "headers", None)
+    quota = quota_from_headers(headers)
+    http_status = getattr(wire, "status_code", None) or getattr(error, "status_code", None)
+    retry_after = getattr(error, "retry_after", None)
+    if retry_after is None and headers:
+        retry_after = headers.get("retry-after")
+    usage = getattr(response, "usage", None)
+    input_tokens = _usage_int(usage, "prompt_tokens", "input_tokens")
+    output_tokens = _usage_int(usage, "completion_tokens", "output_tokens")
+    cached = _usage_int(getattr(usage, "prompt_tokens_details", None), "cached_tokens")
+    result = ProviderCallResult(
+        provider=str(agent.provider), model=str(agent.model), route_id=lease.lease_id,
+        request_id=str(getattr(agent, "api_request_id", "") or "") or None,
+        status=status, http_status=http_status, input_tokens=input_tokens,
+        output_tokens=output_tokens, cached_input_tokens=cached,
+        retry_after=float(retry_after) if retry_after is not None else None,
+        reset_at=quota.reset_at, remaining_requests=quota.remaining_requests,
+        remaining_tokens=quota.remaining_tokens, task_id=str(task_id or "") or None,
+        session_id=str(getattr(agent, "session_id", "") or "") or None,
+        route_source="auto" if not getattr(agent, "_fallback_activated", False) else "fallback",
+        task_class=getattr(getattr(agent, "_global_router_task_class", None), "value", None),
+        retry_count=int(retry_count or 0), reason=str(error)[:240] if error else None,
+    )
+    with suppress(Exception):
+        router.record_provider_result(result)
+
+
 def stop_thinking_spinner(agent: Any, thinking_spinner: Any) -> None:
     """Stop the spinner silently and clear the thinking callback; returns ``None`` so
     callers can rebind ``thinking_spinner = stop_thinking_spinner(agent, thinking_spinner)``."""
@@ -146,12 +192,15 @@ def perform_api_call(
     except BaseException as exc:
         if router is not None and router_lease is not None and router_lease.acquired:
             text = str(exc).lower()
+            wire_status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None)
             failure_type = (
-                "rate_limit_429" if "429" in text or "rate limit" in text else
+                "rate_limit_429" if wire_status == 429 or "429" in text or "rate limit" in text else
                 "quota_exhaustion" if any(x in text for x in ("quota", "insufficient", "credits", "billing")) else
                 "provider_down" if any(x in text for x in ("connection", "timeout", "temporarily unavailable", "503")) else
                 "error"
             )
+            _record_router_result(agent, router_lease, status="RATE_LIMITED" if failure_type == "rate_limit_429" else "FAILURE",
+                                  error=exc, task_id=effective_task_id, retry_count=retry_count)
             with suppress(Exception):
                 retry_after = getattr(exc, "retry_after", None)
                 response_headers = getattr(getattr(exc, "response", None), "headers", None)
@@ -164,6 +213,8 @@ def perform_api_call(
         raise
     else:
         if router is not None and router_lease is not None and router_lease.acquired:
+            _record_router_result(agent, router_lease, status="SUCCESS", response=response,
+                                  task_id=effective_task_id, retry_count=retry_count)
             usage = getattr(response, "usage", None)
             tokens = getattr(usage, "total_tokens", 0) if usage is not None else 0
             try:
