@@ -1834,6 +1834,35 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     construction goes through resolve_provider_client (no duplicated provider→key mappings)."""
     from agent.fallback_cooldown import _arm_rate_limit_cooldown
     cooldown_seconds = _arm_rate_limit_cooldown(agent, reason)
+    # When the authoritative router is attached, it alone selects the next
+    # candidate. This legacy loop remains only as a transport/client swapper.
+    router = getattr(agent, "_global_model_router", None)
+    selected_key = None
+    if router is not None:
+        from agent.global_model_router import Capability, GlobalModelRouter, Route, TaskClass
+        if isinstance(router, GlobalModelRouter):
+            task_class = getattr(agent, "_global_router_task_class", None) or TaskClass.NORMAL
+            if isinstance(task_class, str):
+                task_class = TaskClass(task_class) if task_class in {x.value for x in TaskClass} else TaskClass.NORMAL
+            routes = []
+            for entry in agent._fallback_chain:
+                caps = frozenset(
+                    Capability(c) for c in (entry.get("capabilities") or [])
+                    if c in {x.value for x in Capability}
+                )
+                routes.append(Route(
+                    provider=str(entry.get("provider") or ""), model=str(entry.get("model") or ""),
+                    cost_per_1k=float(entry.get("cost_per_1k") or 0.0), capabilities=caps,
+                ))
+            attempted = set(getattr(agent, "_global_router_attempted_routes", set()) or set())
+            attempted.add((str(getattr(agent, "provider", "") or ""), str(getattr(agent, "model", "") or "")))
+            decision = router.decide_next(routes, task_class, attempted)
+            if decision.route is None:
+                return False
+            selected_key = (decision.route.provider, decision.route.model)
+            agent._global_router_attempted_routes = attempted
+        else:
+            router = None
     while True:
         if agent._fallback_index >= len(agent._fallback_chain):
             return _fallback_chain_exhausted(agent, reason)
@@ -1845,6 +1874,8 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         unavailable = agent._unavailable_fallback_keys
         fb_provider = (fb.get("provider") or "").strip().lower()
         fb_model = (fb.get("model") or "").strip()
+        if selected_key is not None and (fb_provider, fb_model.lower()) != selected_key:
+            continue
         if _should_skip_fallback_candidate(agent, fb, fb_key, fb_provider, fb_model, unavailable):
             continue
 

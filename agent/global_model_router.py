@@ -530,6 +530,26 @@ class GlobalModelRouter:
         state = self.get_route_state(route.provider, route.model)
         return state not in {"disabled", "offline", "auth_failed", "unconfigured"}
 
+    def decide_next(self, routes: list[Route], task_class: TaskClass,
+                    attempted_routes: set[tuple[str, str]] | None = None,
+                    min_context_tokens: int = 0) -> Decision:
+        """Choose the next route for one execution chain, excluding attempted routes.
+
+        This is the continuation entry point: callers may perform client/transport
+        setup, but they must not rank fallback candidates themselves.
+        """
+        attempted = {
+            (_canonical_provider(p), _canonical_model(m))
+            for p, m in (attempted_routes or set())
+        }
+        remaining = [
+            r for r in routes
+            if (_canonical_provider(r.provider), _canonical_model(r.model)) not in attempted
+        ]
+        if not remaining:
+            return Decision(route=None, task_class=task_class, reason="execution chain exhausted")
+        return self.route(remaining, task_class, min_context_tokens)
+
     # ------------------------------------------------------------------
     # Lease management (atomic)
     # ------------------------------------------------------------------
