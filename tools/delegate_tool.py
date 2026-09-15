@@ -208,6 +208,55 @@ def _build_child_agent(
     if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):
         parent_api_key = parent_agent._client_kwargs.get("api_key")
 
+    # Smart Router: an unpinned (model=None) child does NOT inherit the
+    # parent model. None means auto-select via policy (cheap/local first,
+    # strong only for complex reasoning). An explicit task model, a
+    # delegation.model pin, or a provider/base_url override wins over
+    # policy; manual routes are always honored.
+    smart_decision = None
+    smart_budget: Dict[str, Any] = {}
+    smart_route_log = None
+    smart_routed = False
+    try:
+        from agent.smart_router import (
+            auto_route_for_child, candidates_from_parent, smart_router_enabled,
+        )
+        cfg_model_pin = str((delegation_cfg or {}).get("model") or "").strip()
+        if (
+            model is None and not cfg_model_pin
+            and override_provider is None and override_base_url is None
+            and smart_router_enabled(delegation_cfg)
+        ):
+            candidates = candidates_from_parent(parent_agent, delegation_cfg)
+            route, smart_decision, smart_budget = auto_route_for_child(
+                goal=goal, context=context, parent_agent=parent_agent,
+                delegation_cfg=delegation_cfg, candidate_routes=candidates,
+            )
+            if route is not None and getattr(route, "provider", None) != "pinned":
+                # Auto-route is policy, not a user pin: _resolve_child_runtime
+                # must still inherit the parent fallback chain (multi-step
+                # failover), so the flag rides along separately from model/.
+                smart_routed = True
+                parent_route = (
+                    str(getattr(parent_agent, "provider", "") or ""),
+                    str(getattr(parent_agent, "model", "") or ""),
+                )
+                if (str(route.provider or ""), str(route.model or "")) != parent_route:
+                    model = route.model
+                    override_provider = route.provider
+                    if route.base_url:
+                        override_base_url = route.base_url
+            from agent.smart_router import RouteLog as _RouteLog
+            smart_route_log = _RouteLog()
+            if route is not None:
+                smart_route_log.record(
+                    route, outcome="selected",
+                    error="smart-router auto-route: %s" % (
+                        smart_decision.reason if smart_decision else ""),
+                )
+    except Exception as exc:
+        logger.warning("Smart Router auto-route failed, inheriting parent route: %s", exc)
+
     # Shared ref: session_id once the child exists, delegation_id once
     # delegate_task stamps it — both ride on every relayed event.
     child_session_ref: Dict[str, Any] = {}
@@ -222,6 +271,7 @@ def _build_child_agent(
         override_acp_command=override_acp_command,
         override_acp_args=override_acp_args,
         routing_cfg=routing_cfg,
+        smart_routed=smart_routed,
     )
     if override_request_overrides is not None:
         # honored whenever set, incl. the inherit branch where
@@ -280,6 +330,22 @@ def _build_child_agent(
         child._credential_pool = child_pool
 
     _attach_child(parent_agent, child)  # interrupt propagation
+    # Smart Router observability: real route log rides on the child so e2e
+    # and operators can prove which route policy selected (and why).
+    try:
+        if smart_route_log is not None:
+            child._smart_route_log = smart_route_log
+        if smart_decision is not None:
+            child._smart_route_decision = {
+                "reason": smart_decision.reason,
+                "complexity": smart_decision.complexity,
+                "model": getattr(smart_decision.route, "model", None),
+                "provider": getattr(smart_decision.route, "provider", None),
+            }
+        if smart_budget:
+            child._smart_route_budget = dict(smart_budget)
+    except Exception:
+        pass
     # spawn_requested now — the child may queue for seconds when the pool is
     # saturated — then the subagent_start lifecycle hook.
     _safe_progress(child_progress_cb, "subagent.spawn_requested", preview=goal)
@@ -564,7 +630,7 @@ _DESCRIPTION_HEAD = (
     "succeeded.\n"
 )
 _DESCRIPTION_TAIL = (
-    "- Children inherit the parent model unless pinned via delegation.provider / delegation.model in config.yaml."
+    "- Unpinned children auto-select their route via Smart Router policy (cheap/local first, strong only for complex reasoning) — null model means auto-route, not parent inheritance. Pin via delegation.provider / delegation.model in config.yaml."
 )
 
 def _build_tasks_param_description() -> str:

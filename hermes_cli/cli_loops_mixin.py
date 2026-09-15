@@ -452,7 +452,7 @@ class CLILoopsMixin:
         setattr(self, attr, mgr)
         return mgr
 
-    def _get_goal_manager(self):
+    def _get_goal_manager(self, user_text: str = ""):
         """GoalManager bound to the current session_id (see ``_session_bound_manager``)."""
         def load():
             from hermes_cli.goals import GoalManager
@@ -466,7 +466,14 @@ class CLILoopsMixin:
                     max_turns = 20
                 return GoalManager(session_id=sid, default_max_turns=max_turns)
             return make
-        return self._session_bound_manager("_goal_manager", "goal manager", load)
+        manager = self._session_bound_manager("_goal_manager", "goal manager", load)
+        if user_text and manager is not None:
+            try:
+                from hermes_cli.execution_contracts import maybe_auto_activate
+                maybe_auto_activate(getattr(self, "session_id", "") or "", user_text)
+            except Exception as exc:
+                logging.debug("execution contract admission failed: %s", exc)
+        return manager
 
     def _get_heartbeat_manager(self):
         """HeartbeatManager bound to the current session_id (see ``_session_bound_manager``)."""
@@ -655,6 +662,11 @@ class CLILoopsMixin:
         from cli import _DIM, _RST, _cprint, _looks_like_slash_command
         mgr = self._get_goal_manager()
         if mgr is None or not mgr.is_active():
+            return
+        if getattr(mgr.state, "origin", "manual") == "auto":
+            # Auto contract (no /goal from the user): ordinary chat answers
+            # normally with no judge loop.  Enforcement lives at the turn-stop
+            # gate, bounded by MAX_CONTRACT_NUDGES — never an open-ended loop.
             return
 
         # Slash commands don't count as "real user messages": they're dispatched via

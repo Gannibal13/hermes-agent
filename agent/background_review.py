@@ -11,6 +11,7 @@ import copy
 import json
 import logging
 import os
+import re
 import threading
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
@@ -1286,6 +1287,29 @@ __all__ = [
 # Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
 # The whole block is removed by reverting the commit that added it.
 from pathlib import Path  # noqa: F401,E402
+
+_READ_ONLY_TASK_RE = re.compile(
+    r"read.only|read_only|smoke.only"
+    r"|ничего\s+не\s+(исправляй|меняй)|не\s+(исправляй|меняй)\s+ничего"
+    r"|без\s+изменени[яй]|только\s+(чтение|проверка|аудит)"
+    r"|do\s+not\s+(change|modify)|don'?t\s+(change|modify)|no\s+changes?\b|nothing\s+to\s+change",
+    re.I,
+)
+
+
+def _is_read_only_task(user_text: Any) -> bool:
+    """True when the user explicitly declared the turn read-only.
+
+    A read-only turn (audit/smoke/check-only) must not trigger automatic
+    skill/file mutation in the post-turn background review: the review fork
+    may observe, but skill_manage patches are suppressed at the spawn site.
+    Explicit attended ``/refine`` is unaffected.
+    """
+    try:
+        return bool(_READ_ONLY_TASK_RE.search(str(user_text or "")))
+    except Exception:
+        return False
+
 
 def is_background_review_enabled(
     task_cfg: Optional[Dict[str, Any]] = None,
