@@ -663,6 +663,11 @@ class CLILoopsMixin:
         mgr = self._get_goal_manager()
         if mgr is None or not mgr.is_active():
             return
+        if getattr(mgr.state, "origin", "manual") == "auto":
+            # Auto contract (no /goal from the user): ordinary chat answers
+            # normally with no judge loop.  Enforcement lives at the turn-stop
+            # gate, bounded by MAX_CONTRACT_NUDGES — never an open-ended loop.
+            return
 
         # Slash commands don't count as "real user messages": they're dispatched via
         # process_command, not chat(), so a queued /subgoal would consume its slot without

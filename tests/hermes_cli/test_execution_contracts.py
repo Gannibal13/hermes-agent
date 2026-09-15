@@ -8,8 +8,9 @@ from pathlib import Path
 
 from hermes_cli.execution_contracts import (
     COMMAND, COMPOSITE, FILE, REVIEW, RUNTIME, TEST, UI, ExecItem, contract_verdict,
-    extract_requirements, is_substantial_task, maybe_auto_activate, merge_amendment,
-    record_evidence, render_compact, submit_evidence, verify_item,
+    extract_auto_requirements, extract_requirements, is_substantial_task,
+    maybe_auto_activate, merge_amendment, record_evidence, render_compact,
+    submit_evidence, verify_item,
 )
 
 
@@ -157,17 +158,39 @@ def test_mark_done_refuses_open_contract(tmp_path, monkeypatch):
     assert manager.state.status == "done"
 
 
-def test_auto_activation_never_creates_a_goal(tmp_path, monkeypatch):
+def test_auto_activation_creates_contract_without_goal(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     from hermes_cli import goals
 
-    assert maybe_auto_activate("no-goal-session", "Implement the release pipeline end to end with tests") == "skipped-no-goal"
-    assert goals.GoalManager("no-goal-session").has_goal() is False
-    assert maybe_auto_activate("no-goal-session", "hello") == "skipped-chat"
-    manager = goals.GoalManager("goal-session")
-    manager.set("Implement the release pipeline end to end with tests")
-    assert maybe_auto_activate("goal-session", "Implement the release pipeline end to end with tests") == "exists"
-    assert goals.GoalManager("goal-session").state.exec_items
+    substantial = "Implement the release pipeline end to end with tests"
+    assert maybe_auto_activate("fresh-session", substantial) == "created"
+    fresh = goals.GoalManager("fresh-session")
+    assert fresh.has_goal() and fresh.state.origin == "auto"
+    assert fresh.state.exec_items
+    # Ordinary chat: nothing created.
+    assert maybe_auto_activate("chat-session", "hello") == "skipped-chat"
+    assert goals.GoalManager("chat-session").has_goal() is False
+    # Manual goal: filled, never clobbered or re-originated.
+    manager = goals.GoalManager("manual-session")
+    manager.set("Do the thing")
+    assert maybe_auto_activate("manual-session", substantial) == "exists"
+    assert manager.state.origin == "manual"
+    # Paused goal: never touched.
+    manager.pause(reason="hold")
+    assert maybe_auto_activate("manual-session", substantial) == "skipped-inactive"
+
+
+def test_natural_clauses_become_typed_items():
+    items = extract_auto_requirements(
+        "Исправь баг X, добавь regression test, проверь production path, "
+        "запусти typecheck и не считай задачу готовой без runtime evidence.")
+    kinds = [i.spec["type"] for i in items]
+    assert kinds == [FILE, TEST, RUNTIME, COMMAND, REVIEW]
+    assert all(i.required for i in items)
+    # Generic implement-only prompt: advisory, never blocking.
+    vague = extract_auto_requirements("Implement the whole release pipeline end to end carefully")
+    assert len(vague) == 1 and not vague[0].required
+    assert contract_verdict(vague) == (True, [])
 
 
 def test_contract_stop_nudge_is_capped_and_silent_when_satisfied(tmp_path, monkeypatch):

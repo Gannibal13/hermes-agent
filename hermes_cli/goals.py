@@ -423,6 +423,10 @@ class GoalState:
     gates: List[GoalGate] = field(default_factory=list)
     # Runtime evidence contract.  Kept as dictionaries so old state rows remain portable.
     exec_items: List[dict] = field(default_factory=list)
+    # manual = explicit /goal; auto = created by admission for a substantial task
+    # without /goal.  Auto goals skip the judge loop (ordinary chat answers
+    # normally) and are enforced at the turn-stop gate instead.
+    origin: str = "manual"
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -450,6 +454,7 @@ class GoalState:
                 if isinstance(g, dict) and str(g.get("command") or "").strip()
             ],
             exec_items=[dict(item) for item in (data.get("exec_items") or []) if isinstance(item, dict)],
+            origin=str(data.get("origin") or "manual"),
             **ints, **floats,
         )
 
@@ -1132,7 +1137,8 @@ class GoalManager:
         self._pause_state(paused_reason)
         return _decision("paused", False, None, verdict, reason, message)
 
-    def set(self, goal: str, *, max_turns: Optional[int] = None, contract: Optional[GoalContract] = None) -> GoalState:
+    def set(self, goal: str, *, max_turns: Optional[int] = None, contract: Optional[GoalContract] = None,
+            origin: str = "manual") -> GoalState:
         goal = (goal or "").strip()
         if not goal:
             raise ValueError("goal text is empty")
@@ -1140,6 +1146,7 @@ class GoalManager:
             goal=goal, status="active", turns_used=0, created_at=time.time(), last_turn_at=0.0,
             max_turns=int(max_turns) if max_turns else self.default_max_turns,
             contract=contract if contract is not None else GoalContract(),
+            origin=origin or "manual",
         )
         return self._save()
 
@@ -1153,16 +1160,15 @@ class GoalManager:
     def ensure_auto_contract(self, text: Optional[str] = None) -> Optional[GoalState]:
         """Fill the lazy execution checklist on an EXISTING goal if absent.
 
-        Never creates a goal: silent creation would pull ordinary chat into the
-        judge/continuation loop.  Admission (maybe_auto_activate) checks
-        has_goal() first, so reaching here without state means a programming
-        error elsewhere — return None instead of inventing a goal.
+        Never creates a goal (creation is maybe_auto_activate's job, with
+        origin="auto").  Uses the auto extractor so natural-language requests
+        get per-clause items, not just explicit X=TYPE lines.
         """
-        from hermes_cli.execution_contracts import extract_requirements
+        from hermes_cli.execution_contracts import extract_auto_requirements
         if self._state is None:
             return None
         if not self._state.exec_items:
-            self._state.exec_items = [asdict(item) for item in extract_requirements(text or self._state.goal)]
+            self._state.exec_items = [asdict(item) for item in extract_auto_requirements(text or self._state.goal)]
             self._save()
         return self._state
 

@@ -280,6 +280,10 @@ class GatewayGoalsMixin:
         mgr = await self._post_turn_manager(session_entry, "goal continuation", "goals", _load)
         if mgr is None or not mgr.is_active():
             return
+        if getattr(mgr.state, "origin", "manual") == "auto":
+            # Auto contract: no judge loop in gateway chat either; the
+            # turn-stop gate enforces the checklist with a bounded nudge budget.
+            return
 
         _bg_procs, _active_deleg = None, 0
         with suppress(Exception):

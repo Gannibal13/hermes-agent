@@ -106,6 +106,85 @@ def extract_requirements(text: str) -> List[ExecItem]:
     return found
 
 
+def _split_clauses(text: str) -> List[str]:
+    parts = re.split(r"[;\n]+", text or "")
+    clauses: List[str] = []
+    for part in parts:
+        clauses.extend(re.split(r"\.(?=\s)|,(?=\s*\S)|\s+и\s+|\s+then\s+", part, flags=re.I))
+    return [c.strip(" -*\t.,;:!") for c in clauses if len(c.strip(" -*\t.,;:! ")) >= 4]
+
+
+# Verb → evidence class, checked in order.  Generic build/implement/create with
+# no concrete target stays UNKNOWN (advisory): demanding a specific evidence
+# class for unspecified work would be noise, not verification.
+_CLAUSE_VERBS = (
+    (TEST, r"тест|test|regression|регресс"),
+    (REVIEW, r"review|ревью|approve|согласу|проверь.*фина|final.*review|готов|done|complete\b|evidence|доказательств"),
+    (COMMAND, r"typecheck|типизац|линт|lint|mypy|tsc|eslint|ruff|pytest|собери|build|запусти|запустить|\brun\b|команду|command"),
+    (RUNTIME, r"production path|продакш|прод\b|deploy|депло|runtime|smoke|миграц|migrat"),
+    (FILE, r"исправь|почини|fix\b|баг|bug|файл|file\b|патч|patch|код\b|code\b"),
+    (UI, r"\bui\b|интерфейс|кнопка|button|экран|страниц|page\b|вёрстк|скриншот|screenshot"),
+)
+
+
+def _classify_clause(clause: str) -> str:
+    lowered = clause.lower()
+    for kind, pattern in _CLAUSE_VERBS:
+        if re.search(pattern, lowered):
+            return kind
+    return UNKNOWN
+
+
+def _extract_explicit_typed(text: str) -> List[ExecItem]:
+    """Strict path, but only for EXPLICIT markers: a line counts when the type
+    word is assigned with ``=`` (``A=TEST``) or leads the line (``TEST: ...``).
+    Bare words like "test"/"runtime" inside natural prose are NOT markers —
+    those go through clause classification instead.
+    """
+    lines = [line.strip(" -*\t") for line in (text or "").splitlines() if line.strip()]
+    found: List[ExecItem] = []
+    for line in lines:
+        if not re.search(
+            r"=\s*(TEST|COMMAND|RUNTIME|FILE|UI|REVIEW|COMPOSITE)\b"
+            r"|\b(TEST|COMMAND|RUNTIME|FILE|UI|REVIEW|COMPOSITE)\s*="
+            r"|^\s*(TEST|COMMAND|RUNTIME|FILE|UI|REVIEW|COMPOSITE)\b", line, re.I):
+            continue
+        matches = list(_TYPE_RE.finditer(line))
+        for index, match in enumerate(matches):
+            kind = match.group(1).upper()
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(line)
+            req = line[match.end():end].strip(" =:;,.-–—") or line
+            found.append(ExecItem(f"R{len(found) + 1}", req, True, _spec_for(req, kind), trace=line))
+    return found
+
+
+def extract_auto_requirements(text: str) -> List[ExecItem]:
+    """Checklist for a substantial task WITHOUT explicit /goal or typed lines.
+
+    Explicit ``X=TYPE`` lines keep the strict path.  Otherwise each action
+    clause of the natural-language request becomes its own item, classified by
+    verb into an evidence class; clauses with no classifiable evidence signal
+    stay advisory (required=False) and can never brick the goal.
+    """
+    typed = _extract_explicit_typed(text)
+    if typed:
+        return typed
+    clauses = _split_clauses(text)
+    out: List[ExecItem] = []
+    seen = set()
+    for clause in clauses[:8]:
+        key = clause.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        kind = _classify_clause(clause)
+        out.append(ExecItem(f"R{len(out) + 1}", clause, kind != UNKNOWN, {"type": kind}, trace=clause))
+    if not any(item.required for item in out):
+        # Nothing actionable — single advisory fallback (never blocking).
+        return extract_requirements(text)
+    return out
+
+
 def merge_amendment(items: List[ExecItem], new_text: str) -> List[ExecItem]:
     """Append-only: amendments add items, never rewrite or drop existing ones.
 
@@ -163,6 +242,10 @@ def verify_item(item: ExecItem, *, cwd: Optional[str] = None) -> bool:
                 ok = hashlib.sha256(path.read_bytes()).hexdigest() == str(spec["sha256"])
             elif spec.get("content_regex"):
                 ok = re.search(str(spec["content_regex"]), path.read_text(encoding="utf-8"), re.M) is not None
+            else:
+                # Type-only FILE: the named proof artifact must exist.  Presence
+                # is the documented default; hash/regex tighten it when given.
+                ok = bool(spec.get("path")) and path.is_file()
         except (OSError, UnicodeError, re.error):
             ok = False
     elif kind == UI:
@@ -201,6 +284,8 @@ def _fill_spec_from_artifact(item: ExecItem, artifact: str) -> None:
         spec["nodeids"] = [text]
     elif kind in (COMMAND, RUNTIME) and not spec.get("command"):
         spec["command"] = text
+    elif kind == UI and not spec.get("command") and not spec.get("state_file"):
+        spec["command"] = text
     elif kind == FILE and not spec.get("path"):
         spec["path"] = text
     elif kind == REVIEW and not spec.get("artifact"):
@@ -238,14 +323,43 @@ def render_compact(items: Iterable[ExecItem], *, budget: int = 1200) -> str:
 
 
 def maybe_auto_activate(session_id: str, user_text: str) -> str:
-    """Attach a checklist to an EXISTING goal only.  This never creates a goal:
-    silent goal creation would drag ordinary chat into the judge/continuation
-    loop, changing chat behaviour behind the user's back."""
+    """GLOBAL admission: a substantial task gets an ACTIVE CONTRACT even when
+    the user never typed /goal and never mentioned contracts.
+
+    - No goal state at all → create one with origin="auto" and fill the
+      checklist from the request text (typed lines or natural clauses).
+    - Active manual /goal → fill the checklist only if empty (never clobber).
+    - Active auto goal → merge newly-seen requirements append-only (cap 10).
+    - Paused/done/cleared → never touch ("skipped-inactive").
+
+    Auto goals skip the judge loop (see _maybe_continue / gateway) so ordinary
+    chat still answers normally; enforcement lives at the turn-stop gate,
+    bounded by MAX_CONTRACT_NUDGES.
+    """
     if not is_substantial_task(user_text):
         return "skipped-chat"
     from hermes_cli.goals import GoalManager
     manager = GoalManager(session_id=session_id)
-    if not manager.has_goal():
-        return "skipped-no-goal"
-    manager.ensure_auto_contract(user_text)
+    state = manager.state
+    if state is None:
+        manager.set(user_text, origin="auto")
+        manager.ensure_auto_contract(user_text)
+        return "created"
+    if state.status != "active":
+        return "skipped-inactive"
+    if not state.exec_items:
+        manager.ensure_auto_contract(user_text)
+        return "exists"
+    if getattr(state, "origin", "manual") == "auto" and len(state.exec_items) < 10:
+        fresh = extract_auto_requirements(user_text)
+        known = {str(raw.get("requirement", "")).lower() for raw in state.exec_items}
+        added = False
+        for item in fresh:
+            if item.requirement.lower() not in known and len(state.exec_items) < 10:
+                state.exec_items.append(asdict(item))
+                known.add(item.requirement.lower())
+                added = True
+        if added:
+            manager._save()
+            return "merged"
     return "exists"
