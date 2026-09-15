@@ -12,6 +12,7 @@ from contextlib import suppress
 from typing import Any, Callable, List, Optional, Tuple
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
+from agent.background_review import _is_read_only_task
 from agent.turn_failure_copy import exit_reason_failure, stamp_failure
 from agent.context_compressor import _DB_PERSISTED_MARKER
 from agent.message_content import flatten_message_text
@@ -608,10 +609,14 @@ def finalize_turn(
     agent._stream_callback = None  # don't leak into future calls
 
     # Skill trigger is checked NOW — based on how many tool iterations THIS turn used.
+    # An explicitly read-only turn (audit/smoke/check-only) never spawns the
+    # skills review: self-improvement must not patch skills/files behind a
+    # "ничего не меняй" task. Memory review is unaffected (add-only notes).
     _should_review_skills = (
         agent._skill_nudge_interval > 0
         and agent._iters_since_skill >= agent._skill_nudge_interval
         and "skill_manage" in agent.valid_tool_names
+        and not _is_read_only_task(original_user_message or user_message)
     )
     if _should_review_skills:
         agent._iters_since_skill = 0

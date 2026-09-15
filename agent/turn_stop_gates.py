@@ -93,16 +93,20 @@ def _kanban_stop_nudge(agent, messages) -> Optional[str]:
 def _contract_stop_nudge(agent, messages) -> Optional[str]:
     """Keep a substantial task from ending without class-correct runtime evidence.
 
-    Bounded by MAX_CONTRACT_NUDGES across BOTH branches: an open contract gets
-    at most N reminders, and a contract-less substantial stop gets at most N —
-    afterwards ordinary chat proceeds.  A satisfied (all-PASS) contract is
-    silent.  Zero-cost exits first: exhausted budget and missing session return
-    before any session-DB load (one lazy session read per stop otherwise, the
-    same order as the kanban nudge).
+    The gate enforces ONLY an existing active contract with OPEN required
+    items (at most MAX_CONTRACT_NUDGES reminders).  When the session has no
+    active substantial task — no goal, goal not active, or no required
+    items — the gate is a NO-OP and stays silent: a contract-less stop is
+    never a blocker (phantom blockers, issue: smoke-session false
+    positives).  Contract creation belongs to turn-entry admission
+    (``maybe_auto_activate``), never to the stop gate.  A satisfied
+    (all-PASS) contract is silent.  Zero-cost exits first: exhausted budget
+    and missing session return before any session-DB load (one lazy
+    session read per stop otherwise, the same order as the kanban nudge).
     """
     try:
         from hermes_cli.execution_contracts import (
-            MAX_CONTRACT_NUDGES, ExecItem, is_substantial_task, render_compact,
+            MAX_CONTRACT_NUDGES, ExecItem, render_compact,
         )
         from hermes_cli.goals import GoalManager
 
@@ -111,11 +115,6 @@ def _contract_stop_nudge(agent, messages) -> Optional[str]:
         session_id = getattr(agent, "session_id", "") or ""
         if not session_id:
             return None
-        user_text = ""
-        for message in reversed(messages or []):
-            if message.get("role") == "user" and not message.get("_contract_stop_synthetic"):
-                user_text = str(message.get("content") or "")
-                break
         manager = GoalManager(session_id=session_id)
         state = manager.state
         if state is not None and state.status == "active" and state.exec_items:
@@ -124,8 +123,7 @@ def _contract_stop_nudge(agent, messages) -> Optional[str]:
             if open_items:
                 return "⚠️ Контракт выполнения ещё открыт. Нужны реальные доказательства:\n" + render_compact(open_items, budget=1000)
             return None  # contract satisfied — stay silent, never re-nudge
-        if is_substantial_task(user_text):
-            return "⚠️ Блокер: существенная задача остановлена без execution contract. Зафиксируйте требования и реальные доказательства (тест, команда, runtime, файл, UI или review), затем продолжите."
+        return None  # no active substantial task — gate is a NO-OP, never a phantom blocker
     except Exception:
         logger.debug("execution contract stop-loop check failed", exc_info=True)
     return None

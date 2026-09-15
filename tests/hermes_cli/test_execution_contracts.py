@@ -201,7 +201,8 @@ def test_contract_stop_nudge_is_capped_and_silent_when_satisfied(tmp_path, monke
 
     substantial = [{"role": "user", "content": "Implement the release pipeline end to end with tests"}]
     agent = SimpleNamespace(session_id="nudge-cap-test", _contract_stop_nudges=0)
-    assert _contract_stop_nudge(agent, substantial) is not None
+    # No active contract: the stop gate is a NO-OP, never a phantom blocker.
+    assert _contract_stop_nudge(agent, substantial) is None
     capped = SimpleNamespace(session_id="nudge-cap-test", _contract_stop_nudges=3)
     assert _contract_stop_nudge(capped, substantial) is None
     # Satisfied contract: silence even with budget left.
