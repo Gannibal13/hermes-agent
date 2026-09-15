@@ -421,6 +421,8 @@ class GoalState:
     contract: GoalContract = field(default_factory=GoalContract)
     # /goal gate add <cmd>: ALL must pass before the judge may declare done.
     gates: List[GoalGate] = field(default_factory=list)
+    # Runtime evidence contract.  Kept as dictionaries so old state rows remain portable.
+    exec_items: List[dict] = field(default_factory=list)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -447,6 +449,7 @@ class GoalState:
                 GoalGate.from_dict(g) for g in (data.get("gates") or [])
                 if isinstance(g, dict) and str(g.get("command") or "").strip()
             ],
+            exec_items=[dict(item) for item in (data.get("exec_items") or []) if isinstance(item, dict)],
             **ints, **floats,
         )
 
@@ -1147,6 +1150,52 @@ class GoalManager:
         self._state.contract = contract or GoalContract()
         return self._save()
 
+    def ensure_auto_contract(self, text: Optional[str] = None) -> Optional[GoalState]:
+        """Fill the lazy execution checklist on an EXISTING goal if absent.
+
+        Never creates a goal: silent creation would pull ordinary chat into the
+        judge/continuation loop.  Admission (maybe_auto_activate) checks
+        has_goal() first, so reaching here without state means a programming
+        error elsewhere — return None instead of inventing a goal.
+        """
+        from hermes_cli.execution_contracts import extract_requirements
+        if self._state is None:
+            return None
+        if not self._state.exec_items:
+            self._state.exec_items = [asdict(item) for item in extract_requirements(text or self._state.goal)]
+            self._save()
+        return self._state
+
+    def amend_exec(self, text: str) -> List[dict]:
+        from hermes_cli.execution_contracts import ExecItem, merge_amendment
+        state = self._require_goal()
+        old = [ExecItem.from_dict(item) for item in state.exec_items]
+        state.exec_items = [asdict(item) for item in merge_amendment(old, text)]
+        self._save()
+        return state.exec_items
+
+    def set_item_evidence(self, item_id: str, actual_type: str, artifact: str, *, cwd: Optional[str] = None) -> str:
+        """Submit evidence for one item via REAL checker execution.
+
+        Routes through submit_evidence: matrix pre-check, then the checker
+        actually runs (pytest/command/file hash/UI state/review marker/subs).
+        A claim alone never PASSes.  Returns the final verdict.
+        """
+        from hermes_cli.execution_contracts import ExecItem, submit_evidence
+        state = self._require_goal()
+        for raw in state.exec_items:
+            if raw.get("item_id") == item_id:
+                item = ExecItem.from_dict(raw)
+                verdict = submit_evidence(item, actual_type, artifact, cwd=cwd)
+                raw.update(asdict(item))
+                self._save()
+                return verdict
+        raise KeyError(item_id)
+
+    def exec_gate(self) -> Tuple[bool, List[str]]:
+        from hermes_cli.execution_contracts import ExecItem, contract_verdict
+        return contract_verdict(ExecItem.from_dict(item) for item in (self._state.exec_items if self._state else []))
+
     def pause(self, reason: str = "user-paused") -> Optional[GoalState]:
         if not self._state:
             return None
@@ -1172,13 +1221,26 @@ class GoalManager:
         self._save()
         self._state = None
 
-    def mark_done(self, reason: str) -> None:
+    def mark_done(self, reason: str) -> bool:
+        """Mark the goal done — REFUSED while mandatory exec items are open.
+
+        The exec_gate is enforced here so no direct call can bypass the
+        judge-path guard in evaluate_after_turn.  Returns True when the goal
+        is actually done, False when the contract is still open.
+        """
         if not self._state:
-            return
+            return False
+        allowed, open_ids = self.exec_gate()
+        if not allowed:
+            self._state.last_verdict = "continue"
+            self._state.last_reason = "execution contract still open: " + ", ".join(open_ids)
+            self._save()
+            return False
         self._state.status = "done"
         self._state.last_verdict = "done"
         self._state.last_reason = reason
         self._save()
+        return True
 
     # --- /subgoal user controls ---------------------------------------
 
@@ -1489,6 +1551,14 @@ class GoalManager:
             )
 
         if verdict == "done":
+            allowed, open_ids = self.exec_gate()
+            if not allowed:
+                reason = "execution contract still open: " + ", ".join(open_ids)
+                self._save()
+                return _decision(
+                    "active", True, self.next_continuation_prompt(), "continue", reason,
+                    f"↻ Contract remains open ({', '.join(open_ids)}). Evidence is required before completion.",
+                )
             state.status = "done"
             self._save()
             return _decision("done", False, None, "done", reason, f"✓ Goal achieved: {reason}")
@@ -1529,10 +1599,16 @@ class GoalManager:
             contract_block = s.contract.render_block()
             if s.subgoals:
                 contract_block = f"{contract_block}\n{_render_extra_criteria(s.subgoals)}"
-            return CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE.format(goal=s.goal, contract_block=contract_block)
-        if s.subgoals:
-            return CONTINUATION_PROMPT_WITH_SUBGOALS_TEMPLATE.format(goal=s.goal, subgoals_block=s.render_subgoals_block())
-        return CONTINUATION_PROMPT_TEMPLATE.format(goal=s.goal)
+            prompt = CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE.format(goal=s.goal, contract_block=contract_block)
+        elif s.subgoals:
+            prompt = CONTINUATION_PROMPT_WITH_SUBGOALS_TEMPLATE.format(goal=s.goal, subgoals_block=s.render_subgoals_block())
+        else:
+            prompt = CONTINUATION_PROMPT_TEMPLATE.format(goal=s.goal)
+        if s.exec_items:
+            from hermes_cli.execution_contracts import ExecItem, render_compact
+            block = render_compact((ExecItem.from_dict(item) for item in s.exec_items), budget=1200)
+            prompt = f"{prompt}\n\n{block}"
+        return prompt
 
     def render_contract(self) -> str:
         """Public helper for the /goal show + /goal draft slash commands."""

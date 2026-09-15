@@ -3528,6 +3528,16 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
 
         self._agent_running = self._interactive_turn = True
         self._pet_turn_error = self._pet_reasoning = False
+        # Execution-contract admission by TEXT (not by call site): a substantial
+        # request fills the checklist only when a /goal is already active —
+        # never creates one, so ordinary chat is untouched.  Slash commands are
+        # excluded (dispatched via process_command, not chat()).
+        if isinstance(user_input, str) and not _looks_like_slash_command(user_input):
+            try:
+                from hermes_cli.execution_contracts import maybe_auto_activate
+                maybe_auto_activate(getattr(self, "session_id", "") or "", user_input)
+            except Exception as exc:
+                logging.debug("execution contract admission failed: %s", exc)
         self._turn_summary_begin()
         self._app.invalidate()
         try:

@@ -88,7 +88,15 @@ class GatewayGoalsMixin:
             from hermes_cli.goals import GoalManager
             max_turns = self._goal_max_turns_from_config()
             return lambda sid: GoalManager(session_id=sid, default_max_turns=max_turns)
-        return await self._manager_for_event(event, "goal", _load)
+        result = await self._manager_for_event(event, "goal", _load)
+        try:
+            manager, session_entry = result
+            if session_entry is not None and not getattr(event, "internal", False):
+                from hermes_cli.execution_contracts import maybe_auto_activate
+                maybe_auto_activate(session_entry.session_id, getattr(event, "text", "") or "")
+        except Exception as exc:
+            logger.debug("execution contract admission failed: %s", exc)
+        return result
 
     async def _get_heartbeat_manager_for_event(self, event: "MessageEvent"):
         """Return ``(HeartbeatManager, session_entry)`` for this event, or ``(None, None)``."""

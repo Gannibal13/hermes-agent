@@ -90,6 +90,47 @@ def _kanban_stop_nudge(agent, messages) -> Optional[str]:
         return None
 
 
+def _contract_stop_nudge(agent, messages) -> Optional[str]:
+    """Keep a substantial task from ending without class-correct runtime evidence.
+
+    Bounded by MAX_CONTRACT_NUDGES across BOTH branches: an open contract gets
+    at most N reminders, and a contract-less substantial stop gets at most N —
+    afterwards ordinary chat proceeds.  A satisfied (all-PASS) contract is
+    silent.  Zero-cost exits first: exhausted budget and missing session return
+    before any session-DB load (one lazy session read per stop otherwise, the
+    same order as the kanban nudge).
+    """
+    try:
+        from hermes_cli.execution_contracts import (
+            MAX_CONTRACT_NUDGES, ExecItem, is_substantial_task, render_compact,
+        )
+        from hermes_cli.goals import GoalManager
+
+        if getattr(agent, "_contract_stop_nudges", 0) >= MAX_CONTRACT_NUDGES:
+            return None
+        session_id = getattr(agent, "session_id", "") or ""
+        if not session_id:
+            return None
+        user_text = ""
+        for message in reversed(messages or []):
+            if message.get("role") == "user" and not message.get("_contract_stop_synthetic"):
+                user_text = str(message.get("content") or "")
+                break
+        manager = GoalManager(session_id=session_id)
+        state = manager.state
+        if state is not None and state.status == "active" and state.exec_items:
+            open_items = [ExecItem.from_dict(raw) for raw in state.exec_items
+                          if raw.get("required", True) and raw.get("verdict") != "PASS"]
+            if open_items:
+                return "⚠️ Контракт выполнения ещё открыт. Нужны реальные доказательства:\n" + render_compact(open_items, budget=1000)
+            return None  # contract satisfied — stay silent, never re-nudge
+        if is_substantial_task(user_text):
+            return "⚠️ Блокер: существенная задача остановлена без execution contract. Зафиксируйте требования и реальные доказательства (тест, команда, runtime, файл, UI или review), затем продолжите."
+    except Exception:
+        logger.debug("execution contract stop-loop check failed", exc_info=True)
+    return None
+
+
 def _append_interim_answer(agent, final_msg, messages, conversation_history, flush_fail_msg: str) -> None:
     """Real content: persist and emit as interim so the user sees the attempted answer;
     only the nudge is flagged synthetic (#65919)."""
@@ -106,7 +147,8 @@ def apply_stop_gates(
     conversation_history: Any, pending_verification_response: Any,
     pending_verification_response_previewed: Any,
 ) -> StopGateVerdict:
-    """Run verify-on-stop → pre_verify hook → kanban stop guard, in that order. Nudges
+    """Run verify-on-stop → pre_verify hook → kanban stop guard → execution-contract
+    nudge, in that order. Nudges
     are user-role rows appended only after the assistant answer row, so role alternation
     holds. Hook lookups are imported lazily from their origin modules (tests patch them
     there)."""
@@ -167,6 +209,13 @@ def apply_stop_gates(
             "kanban_complete/kanban_block — nudging to finish"
         )
         return verdict
+
+    _contract_nudge = _contract_stop_nudge(agent, messages)
+    if _contract_nudge:
+        agent._contract_stop_nudges = getattr(agent, "_contract_stop_nudges", 0) + 1
+        final_msg["finish_reason"] = "contract_open"
+        append_message(messages, final_msg)
+        return _continue(_contract_nudge, "_contract_stop_synthetic")
     return StopGateVerdict(
         continue_turn=False, final_response=final_response,
         pending_verification_response=pending_verification_response,
