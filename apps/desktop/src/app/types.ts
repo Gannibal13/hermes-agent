@@ -153,6 +153,9 @@ export interface ClientSessionState {
   cwd: string
   model: string
   provider: string
+  /** Runtime route provenance for the most recently completed/current turn. */
+  fallback?: boolean
+  fallbackReason?: string
   reasoningEffort: string
   serviceTier: string
   fast: boolean

@@ -128,6 +128,73 @@ it('returns to the exact caret or backward selection after the model menu closes
 })
 
 describe('ModelPill per-surface model label', () => {
+  it('keeps FALLBACK and its reason visible in compact mode', () => {
+    const fallbackView: SessionView = {
+      kind: 'tile',
+      $awaitingResponse: atom(false),
+      $busy: atom(false),
+      $cwd: atom(''),
+      $fallback: atom(true),
+      $fallbackReason: atom('provider overloaded'),
+      $fast: atom(false),
+      $lastVisibleIsUser: atom(false),
+      $messages: atom([]),
+      $messagesEmpty: atom(true),
+      $model: atom('backup/strong'),
+      $provider: atom('backup'),
+      $reasoningEffort: atom('high'),
+      $runtimeId: atom('fallback-runtime'),
+      $storedId: atom('fallback-stored'),
+      $turnStartedAt: atom<number | null>(null)
+    }
+
+    render(
+      <SessionViewProvider value={fallbackView}>
+        <ModelPill compact disabled={false} model={modelState({ model: 'backup/strong', provider: 'backup' })} />
+      </SessionViewProvider>
+    )
+
+    expect(screen.getByTestId('model-fallback-badge').textContent).toBe('FALLBACK')
+    expect(screen.getByTestId('model-fallback-badge').getAttribute('title')).toBe('provider overloaded')
+  })
+
+  it('shows FALLBACK with the runtime reason only on the affected session', () => {
+    const fallbackView: SessionView = {
+      kind: 'tile',
+      $awaitingResponse: atom(false),
+      $busy: atom(false),
+      $cwd: atom(''),
+      $fallback: atom(true),
+      $fallbackReason: atom('429 rate limited'),
+      $fast: atom(false),
+      $lastVisibleIsUser: atom(false),
+      $messages: atom([]),
+      $messagesEmpty: atom(true),
+      $model: atom('backup/strong'),
+      $provider: atom('backup'),
+      $reasoningEffort: atom('high'),
+      $runtimeId: atom('fallback-runtime'),
+      $storedId: atom('fallback-stored'),
+      $turnStartedAt: atom<number | null>(null)
+    }
+
+    const { rerender } = render(
+      <SessionViewProvider value={fallbackView}>
+        <ModelPill disabled={false} model={modelState({ model: 'backup/strong', provider: 'backup' })} />
+      </SessionViewProvider>
+    )
+
+    expect(screen.getByTestId('model-fallback-badge').getAttribute('title')).toBe('429 rate limited')
+
+    rerender(
+      <SessionViewProvider value={{ ...fallbackView, $fallback: atom(false), $fallbackReason: atom('') }}>
+        <ModelPill disabled={false} model={modelState({ model: 'primary/simple', provider: 'primary' })} />
+      </SessionViewProvider>
+    )
+
+    expect(screen.queryByTestId('model-fallback-badge')).toBeNull()
+  })
+
   it('shows the chat-bar model even when the primary global differs', () => {
     setCurrentModel('primary/model')
     $activeSessionId.set('primary-runtime')

@@ -78,6 +78,9 @@ export type GatewayEventPayload = {
   revision?: number
   model?: string
   provider?: string
+  // message.complete runtime route provenance (post-router, UI-facing).
+  fallback?: boolean
+  fallback_reason?: string | null
   reasoning_effort?: string
   service_tier?: string
   fast?: boolean

@@ -1,4 +1,5 @@
 import { useStore } from '@nanostores/react'
+import { atom } from 'nanostores'
 import { useEffect, useRef, useState } from 'react'
 
 import { useSessionView } from '@/app/chat/session-view'
@@ -29,6 +30,9 @@ const PILL = cn(
   'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground'
 )
 
+const $NO_FALLBACK = atom(false)
+const $NO_FALLBACK_REASON = atom('')
+
 /**
  * Composer model selector — the relocated status-bar pill. Reuses the live
  * `model.options` dropdown (`modelMenuContent`) verbatim; falls back to the
@@ -56,6 +60,8 @@ export function ModelPill({
   const viewProvider = useStore(view.$provider)
   const currentModel = model.model || viewModel
   const currentProvider = model.provider || viewProvider
+  const isFallback = useStore(view.$fallback ?? $NO_FALLBACK)
+  const fallbackReason = useStore(view.$fallbackReason ?? $NO_FALLBACK_REASON)
   const fastMode = useStore(view.$fast)
   const modelSource = useStore($currentModelSource)
   const runtimeId = useStore(view.$runtimeId)
@@ -125,13 +131,35 @@ export function ModelPill({
   // flash a literal "No model", show a quiet loader (inherits the pill text
   // color at half opacity) until a model lands.
   const label = compact ? (
-    <ChevronDown className="size-3.5 shrink-0 opacity-70" />
+    <>
+      {isFallback && (
+        <span
+          aria-label={fallbackReason ? `FALLBACK: ${fallbackReason}` : 'FALLBACK'}
+          className="shrink-0 rounded px-1 text-[9px] font-semibold tracking-wide text-amber-600"
+          data-testid="model-fallback-badge"
+          title={fallbackReason || undefined}
+        >
+          FALLBACK
+        </span>
+      )}
+      <ChevronDown className="size-3.5 shrink-0 opacity-70" />
+    </>
   ) : (
     <>
       {currentModel.trim() ? (
         <span className="truncate">{formatModelPillLabel(currentModel, { fastMode })}</span>
       ) : (
         <GlyphSpinner className="opacity-50" spinner="braille" />
+      )}
+      {isFallback && (
+        <span
+          aria-label={fallbackReason ? `FALLBACK: ${fallbackReason}` : 'FALLBACK'}
+          className="shrink-0 rounded px-1 text-[9px] font-semibold tracking-wide text-amber-600"
+          data-testid="model-fallback-badge"
+          title={fallbackReason || undefined}
+        >
+          FALLBACK
+        </span>
       )}
       {pinnedOverride && (
         <span
@@ -148,7 +176,10 @@ export function ModelPill({
   // Compact (floating composer): a snug square holding just the chevron — no pill
   // padding, sized to match the other composer icon buttons.
   const pillClass = compact
-    ? cn(
+    ? isFallback ? cn(
+        'h-(--composer-control-size) w-auto shrink-0 justify-center gap-0.5 rounded-md px-1',
+        'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground'
+      ) : cn(
         'size-(--composer-control-size) shrink-0 justify-center gap-0 rounded-md p-0',
         'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground'
       )

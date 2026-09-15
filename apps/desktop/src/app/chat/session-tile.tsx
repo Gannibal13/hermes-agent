@@ -148,6 +148,8 @@ function buildTileView(storedSessionId: string): SessionView {
     $messagesEmpty: computed($messages, messages => messages.length === 0),
     $model: computed($state, state => state?.model ?? ''),
     $provider: computed($state, state => state?.provider ?? ''),
+    $fallback: computed($state, state => Boolean(state?.fallback)),
+    $fallbackReason: computed($state, state => state?.fallbackReason ?? ''),
     $reasoningEffort: computed($state, state => state?.reasoningEffort ?? ''),
     $runtimeId,
     // Constant for the tile's lifetime — a plain atom, not a computed.

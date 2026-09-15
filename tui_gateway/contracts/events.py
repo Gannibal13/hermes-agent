@@ -179,6 +179,12 @@ class MessageCompletePayload(Payload):
     recoverable: bool | None = None
     error_surface: ErrorSurface | None = None
     partial: bool | None = None
+    # The route that actually served this turn. These are runtime facts, not
+    # the user's configured/picked model (which may differ after fallback).
+    model: str | None = None
+    provider: str | None = None
+    fallback: bool | None = None
+    fallback_reason: str | None = None
 
 
 event("message.complete", MessageCompletePayload, doc="The turn ended: final text, usage and outcome.")

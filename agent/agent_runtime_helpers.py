@@ -652,6 +652,18 @@ def sync_credential_pool_entry_id(agent) -> None:
         agent._credential_pool_entry_id = None
 
 
+def notify_runtime_route_changed(agent) -> None:
+    """Notify an optional observer after the effective provider/model changes.
+
+    Runtime selection remains owned by the existing fallback/restore paths; the
+    gateway installs this best-effort hook only to publish their settled state.
+    """
+    callback = getattr(agent, "_on_runtime_route_changed", None)
+    if callable(callback):
+        with contextlib.suppress(Exception):
+            callback(agent)
+
+
 _STATUS_TO_FAILOVER_REASON = {
     402: FailoverReason.billing, 429: FailoverReason.rate_limit, 401: FailoverReason.auth,
     403: FailoverReason.auth,
@@ -1190,6 +1202,8 @@ def restore_primary_runtime(agent) -> bool:
         logger.info("Primary runtime restored for new turn: %s (%s)", agent.model, agent.provider)
         agent._provider_fallback_active = False
         agent._provider_fallback_route = None
+        agent._provider_fallback_reason = None
+        notify_runtime_route_changed(agent)
         if provider_fallback_active:
             # Notification surfaces are best-effort and must never undo a successful restore.
             with contextlib.suppress(Exception):
@@ -2110,6 +2124,7 @@ def _finish_switch(agent, new_provider, old_norm, new_norm) -> None:
     agent._fallback_activated = False
     agent._provider_fallback_active = False
     agent._provider_fallback_route = None
+    agent._provider_fallback_reason = None
     agent._fallback_index = 0
     # On a deliberate provider swap, prune fallback entries targeting the OLD or NEW primary;
     # otherwise a failed turn silently re-activates the provider the user just rejected.

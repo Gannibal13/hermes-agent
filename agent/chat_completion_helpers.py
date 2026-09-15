@@ -2062,6 +2062,11 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             # provenance so the restore path only emits a recovery notice after a real fallback.
             agent._provider_fallback_active = True
             agent._provider_fallback_route = (str(fb_model), str(fb_provider))
+            # Observability only: the turn gateway reads this after the router
+            # has selected the new runtime. Keep policy in the existing path.
+            agent._provider_fallback_reason = _fallback_reason_text(reason)
+            from agent.agent_runtime_helpers import notify_runtime_route_changed
+            notify_runtime_route_changed(agent)
             logger.info("Fallback activated: %s → %s (%s)", old_model, fb_model, fb_provider)
             # The stale-call streak measured the OLD provider; carrying it over would
             # short-circuit the fresh fallback before its first stream attempt.

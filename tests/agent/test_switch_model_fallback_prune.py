@@ -85,11 +85,13 @@ def test_manual_switch_clears_provider_fallback_provenance():
     ])
     agent._provider_fallback_active = True
     agent._provider_fallback_route = ("fallback-model", "fallback-provider")
+    agent._provider_fallback_reason = "rate_limited"
 
     _switch_to_anthropic(agent)
 
     assert agent._provider_fallback_active is False
     assert agent._provider_fallback_route is None
+    assert agent._provider_fallback_reason is None
 
 
 

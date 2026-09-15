@@ -30,6 +30,12 @@ def _make_agent(fallback_model=None):
             fallback_model=fallback_model,
         )
         agent.client = MagicMock()
+        # This module verifies the caller-declared compatibility-chain order.
+        # Give every fixture an explicit equal cost so a models.dev cache warmed
+        # by an earlier test cannot replace the implicit zero with catalog prices
+        # and make the order process-history dependent.
+        for entry in agent._fallback_chain:
+            entry.setdefault("cost_per_1k", 1.0)
         return agent
 
 
@@ -119,6 +125,11 @@ class TestFallbackChainAdvancement:
         )
         agent.model = "gpt-5.6-sol"
         agent.provider = "openai-codex"
+        route_changes = []
+        agent._on_runtime_route_changed = lambda current: route_changes.append(
+            (current.provider, current.model, current._provider_fallback_active,
+             current._provider_fallback_reason)
+        )
         with patch(
             "agent.auxiliary_client.resolve_provider_client",
             return_value=(_mock_client(base_url="https://api.z.ai/v1"), "glm-5.2"),
@@ -132,6 +143,7 @@ class TestFallbackChainAdvancement:
         )
         assert agent._pending_fallback_notice == [expected]
         assert agent._retry_status_buffer[-1] == ("status", expected)
+        assert route_changes == [("zai", "glm-5.2", True, "rate limit")]
 
     @patch("time.monotonic", return_value=1000.0)
     def test_records_sequential_switches_in_order(self, _clock):

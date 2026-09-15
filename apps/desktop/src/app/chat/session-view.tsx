@@ -1,4 +1,4 @@
-import { computed, type ReadableAtom } from 'nanostores'
+import { atom, computed, type ReadableAtom } from 'nanostores'
 import { createContext, useContext } from 'react'
 
 import type { ClientSessionState } from '@/app/types'
@@ -56,6 +56,8 @@ export interface SessionView {
   $cwd: ReadableAtom<string>
   $model: ReadableAtom<string>
   $provider: ReadableAtom<string>
+  $fallback?: ReadableAtom<boolean>
+  $fallbackReason?: ReadableAtom<string>
   $fast: ReadableAtom<boolean>
   $reasoningEffort: ReadableAtom<string>
 }
@@ -64,6 +66,9 @@ export interface SessionView {
 const $primaryState = computed([$activeSessionId, $sessionStates], (runtimeId, states) =>
   runtimeId ? states[runtimeId] : undefined
 )
+
+const $NO_FALLBACK = atom(false)
+const $NO_FALLBACK_REASON = atom('')
 
 /**
  * Read one field from the active session's slice, falling back to the global
@@ -103,6 +108,8 @@ export const PRIMARY_SESSION_VIEW: SessionView = {
   $messagesEmpty: computed($primaryMessages, messages => messages.length === 0),
   $model: primaryField<string>(state => state.model, $currentModel),
   $provider: primaryField<string>(state => state.provider, $currentProvider),
+  $fallback: primaryField<boolean>(state => Boolean(state.fallback), $NO_FALLBACK),
+  $fallbackReason: primaryField<string>(state => state.fallbackReason ?? '', $NO_FALLBACK_REASON),
   $reasoningEffort: primaryField<string>(state => state.reasoningEffort, $currentReasoningEffort),
   $runtimeId: $activeSessionId,
   $storedId: $selectedStoredSessionId,

@@ -7,7 +7,8 @@ import type { ClientSessionState } from '../../../types'
 type SessionRuntimeStatePatch = Partial<
   Pick<
     ClientSessionState,
-    'branch' | 'cwd' | 'fast' | 'model' | 'personality' | 'provider' | 'reasoningEffort' | 'serviceTier' | 'yolo'
+    'branch' | 'cwd' | 'fast' | 'model' | 'personality' | 'provider' | 'reasoningEffort' | 'serviceTier' | 'yolo' |
+    'fallback' | 'fallbackReason'
   >
 >
 
@@ -50,11 +51,39 @@ export function sessionInfoStatePatch(payload: GatewayEventPayload | undefined):
     patch.yolo = payload.yolo
   }
 
+  if (typeof payload?.fallback === 'boolean') {
+    patch.fallback = payload.fallback
+    patch.fallbackReason = payload.fallback === true && typeof payload.fallback_reason === 'string'
+      ? payload.fallback_reason
+      : ''
+  }
+
   return patch
 }
 
 export function hasSessionInfoStatePatch(patch: SessionRuntimeStatePatch): boolean {
   return Object.keys(patch).length > 0
+}
+
+/** Runtime route from message.complete. Replaced every turn so fallback
+ * provenance cannot stick after a later manual/simple/strong selection. */
+export function sessionRouteStatePatch(payload: GatewayEventPayload | undefined):
+  Pick<ClientSessionState, 'model' | 'provider' | 'fallback' | 'fallbackReason'> | null {
+  if (
+    typeof payload?.model !== 'string' || payload.model.length === 0 ||
+    typeof payload.provider !== 'string' || payload.provider.length === 0
+  ) {
+    return null
+  }
+
+  return {
+    model: payload.model ?? '',
+    provider: payload.provider ?? '',
+    fallback: payload.fallback === true,
+    fallbackReason: payload.fallback === true && typeof payload.fallback_reason === 'string'
+      ? payload.fallback_reason
+      : ''
+  }
 }
 
 /** Keep the runtime-state object when a heartbeat only restates cached fields.
@@ -71,6 +100,8 @@ export function applySessionInfoStatePatch(
     (patch.model === undefined || patch.model === state.model) &&
     (patch.personality === undefined || patch.personality === state.personality) &&
     (patch.provider === undefined || patch.provider === state.provider) &&
+    (patch.fallback === undefined || patch.fallback === state.fallback) &&
+    (patch.fallbackReason === undefined || patch.fallbackReason === state.fallbackReason) &&
     (patch.reasoningEffort === undefined || patch.reasoningEffort === state.reasoningEffort) &&
     (patch.serviceTier === undefined || patch.serviceTier === state.serviceTier) &&
     (patch.yolo === undefined || patch.yolo === state.yolo)

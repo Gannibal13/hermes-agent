@@ -19,6 +19,8 @@ import { refreshSupportedSessionControlAfterTurn } from '@/store/session-control
 import { pruneFinishedSessionSubagents } from '@/store/subagents'
 import { clearActiveSessionTodos } from '@/store/todos'
 
+import { sessionRouteStatePatch } from '../utils'
+
 import type { GatewayEventContext } from './types'
 
 function firstBillingLine(text: string): string {
@@ -351,6 +353,26 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
         : undefined
 
     completeAssistantMessage(sessionId, finalText, payload?.response_previewed, failure, occurredAt)
+
+    // message.complete carries the post-router runtime pair. Reconcile it
+    // directly so a fallback is visible immediately, without waiting for a
+    // session.info heartbeat (which may still describe persisted config).
+    const routePatch = sessionRouteStatePatch(payload)
+
+    if (routePatch) {
+      updateSessionState(sessionId, state => {
+        const { model, provider, fallback, fallbackReason } = routePatch
+
+        if (
+          state.model === model && state.provider === provider && state.fallback === fallback &&
+          state.fallbackReason === fallbackReason
+        ) {
+          return state
+        }
+
+        return { ...state, model, provider, fallback, fallbackReason }
+      })
+    }
 
     // Onboarding's first build: between turns is the only moment Setup may
     // put a check-in into that session (no-op everywhere else).

@@ -7,10 +7,37 @@ import {
   delegateTaskPayloads,
   hasSessionInfoStatePatch,
   sessionInfoStatePatch,
+  sessionRouteStatePatch,
   toTodoPayload
 } from './utils'
 
 const payload = (over: Record<string, unknown>): GatewayEventPayload => over as GatewayEventPayload
+
+describe('sessionRouteStatePatch', () => {
+  it('tracks simple → strong → simple without sticky fallback state', () => {
+    const state = { model: 'simple', provider: 'primary', fallback: false, fallbackReason: '' }
+    const strong = sessionRouteStatePatch(payload({ model: 'strong', provider: 'backup', fallback: true, fallback_reason: '429' }))
+    const simple = sessionRouteStatePatch(payload({ model: state.model, provider: state.provider, fallback: false }))
+
+    expect(strong).toEqual({ model: 'strong', provider: 'backup', fallback: true, fallbackReason: '429' })
+    expect({ ...state, ...strong, ...simple }).toEqual(state)
+  })
+
+  it('preserves a manual provider/model pair and clears fallback reason', () => {
+    expect(sessionRouteStatePatch(payload({ model: 'manual-model', provider: 'manual', fallback: false }))).toEqual({
+      model: 'manual-model', provider: 'manual', fallback: false, fallbackReason: ''
+    })
+  })
+
+  it('ignores a partial route instead of blanking the other half of the pair', () => {
+    expect(sessionRouteStatePatch(payload({ model: 'model-without-provider', fallback: true }))).toBeNull()
+    expect(sessionRouteStatePatch(payload({ provider: 'provider-without-model', fallback: true }))).toBeNull()
+  })
+
+  it('keeps compatibility with an older backend that sends no route fields', () => {
+    expect(sessionRouteStatePatch(payload({ text: 'legacy reply', status: 'complete' }))).toBeNull()
+  })
+})
 
 describe('completionErrorText', () => {
   it('flags provider/HTTP/retry failures, ignores normal text', () => {

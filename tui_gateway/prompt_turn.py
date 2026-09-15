@@ -558,10 +558,20 @@ def _invoke_agent(
     _title_key = session.get("session_key") or sid
     agent._on_session_title = lambda t, _src, _k=_title_key: _emit(
         "session.title", sid, {"session_id": _k, "title": t})
+    # The agent owns route transitions. Publish each settled fallback/restore
+    # immediately, before its next streamed token, instead of waiting for the
+    # terminal message.complete snapshot.
+    _route_change_callback = lambda current=agent: _emit(
+        "session.info", sid, _session_info(current, session))
+    agent._on_runtime_route_changed = _route_change_callback
     _usage_stop, _usage_thread = _start_usage_ticker(sid, agent)
     try:
         st.result = agent.run_conversation(run_message, **st.run_kwargs)
     finally:
+        # Do not retain this turn's session/sid closure after completion.  The
+        # identity guard avoids clearing a newer callback if ownership changes.
+        if getattr(agent, "_on_runtime_route_changed", None) is _route_change_callback:
+            agent._on_runtime_route_changed = None
         # Stop AND join before anything emits: a tick surviving past message.complete would
         # roll the client's usage back to a stale snapshot (unbounded join: same worst case).
         _usage_stop.set()
@@ -636,7 +646,18 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
     settles the hosted-room terminal receipt."""
     result, agent = st.result, st.agent
     raw, status, last_reasoning = _turn_outcome(result)
-    payload = {"text": raw, "usage": _get_usage(agent), "status": status}
+    fallback = bool(getattr(agent, "_provider_fallback_active", False))
+    payload = {
+        "text": raw, "usage": _get_usage(agent), "status": status,
+        # agent.model/provider are the authoritative post-router runtime pair.
+        "model": str(getattr(agent, "model", "") or "") or None,
+        "provider": str(getattr(agent, "provider", "") or "") or None,
+        "fallback": fallback,
+        "fallback_reason": (
+            str(getattr(agent, "_provider_fallback_reason", "") or "") or None
+            if fallback else None
+        ),
+    }
     if last_reasoning:
         payload["reasoning"] = last_reasoning
     if status_note:

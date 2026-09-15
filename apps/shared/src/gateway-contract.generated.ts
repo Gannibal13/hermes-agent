@@ -573,6 +573,8 @@ export interface ConfigSetResult {
 export interface SessionLiveInfo {
   model?: string
   provider?: string
+  fallback?: boolean
+  fallback_reason?: string | null
   reasoning_effort?: string
   service_tier?: string
   fast?: boolean
@@ -2681,6 +2683,8 @@ export interface SessionCwdSetParams {
 export interface SessionCwdSetResult {
   model?: string
   provider?: string
+  fallback?: boolean
+  fallback_reason?: string | null
   reasoning_effort?: string
   service_tier?: string
   fast?: boolean
@@ -3859,6 +3863,10 @@ export interface MessageCompletePayload {
   recoverable?: boolean | null
   error_surface?: ErrorSurface | null
   partial?: boolean | null
+  model?: string | null
+  provider?: string | null
+  fallback?: boolean | null
+  fallback_reason?: string | null
 }
 /** ``prompt_turn._result_status``. */
 export type TurnStatus = 'complete' | 'error' | 'interrupted'

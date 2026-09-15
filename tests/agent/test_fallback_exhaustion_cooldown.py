@@ -217,8 +217,13 @@ class TestRateLimitBackoffEscalation:
         # Cooldown expired; the primary restores successfully.
         agent._fallback_activated = True
         agent._rate_limited_until = 0
+        route_changes = []
+        agent._on_runtime_route_changed = lambda current: route_changes.append(
+            (current.provider, current.model, current._provider_fallback_active)
+        )
         assert agent._restore_primary_runtime() is True
         assert agent._rate_limit_backoff_count == 0
+        assert route_changes == [(agent.provider, agent.model, False)]
 
         # The next rate-limit is treated as a fresh first failure: 60s.
         with (

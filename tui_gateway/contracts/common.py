@@ -64,6 +64,8 @@ class SessionLiveInfo(OpenModel):
 
     model: str = ""
     provider: str = ""
+    fallback: bool = False
+    fallback_reason: str | None = None
     reasoning_effort: str = ""
     service_tier: str = ""
     fast: bool = False
