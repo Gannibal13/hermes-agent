@@ -712,10 +712,122 @@ def _repair_current_checkout(
     return current_checkout_complete
 
 
+def _ongoing_rebase_state(git_cmd) -> str | None:
+    """Name of the in-progress git operation holding the checkout (``"rebase"``,
+    ``"merge"``, ``"cherry-pick"``, ``"revert"``, ``"bisect"``), or None. Read-only
+    probe of ``.git`` state markers; never mutates anything."""
+    markers = (
+        ("rebase-merge", "rebase"), ("rebase-apply", "rebase"),
+        ("MERGE_HEAD", "merge"), ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"), ("BISECT_LOG", "bisect"))
+    git_dir = _m().PROJECT_ROOT / ".git"
+    if (git_dir / "HEAD").is_file():  # normal repo (not a worktree pointer)
+        for name, op in markers:
+            if (git_dir / name).exists():
+                return op
+        return None
+    # Worktree/submodule: .git is a file pointing at the real git dir.
+    result = _git_run(git_cmd, ["rev-parse", "--git-dir"])
+    if result.returncode == 0 and result.stdout.strip():
+        real = Path(result.stdout.strip())
+        real = real if real.is_absolute() else (_m().PROJECT_ROOT / real)
+        for name, op in markers:
+            if (real / name).exists():
+                return op
+    return None
+
+
+def _refuse_update_during_in_progress_op(git_cmd, branch: str) -> None:
+    """STOP before pull/reconciliation while a merge/rebase/cherry-pick/revert/bisect
+    is unfinished. Resetting (or even ff-merging) on top of that state silently
+    discards the user's in-flight operation; the updater must never "heal" it."""
+    op = _ongoing_rebase_state(git_cmd)
+    if op is None:
+        return
+    print(f"✗ An unfinished {op} is in progress in {_m().PROJECT_ROOT}.")
+    print("  The update was stopped BEFORE touching anything — no fetch-reconcile ran.")
+    print(f"  Finish or abort it first:  git {op} --continue  |  git {op} --abort")
+    print(f"  Then re-run: hermes update (branch {branch})")
+    sys.exit(1)
+
+
+def _local_remote_ahead(git_cmd, branch: str) -> tuple[int, int]:
+    """``(local_ahead, remote_ahead)`` commit counts for HEAD vs ``origin/<branch>``.
+
+    ``-1`` means "count unavailable" (rev-list failed); callers treat -1 as
+    "unknown → assume the worst (diverged)" so they stay on the safe path.
+    """
+    local = _git_run(git_cmd, ["rev-list", "--count", f"origin/{branch}..HEAD"])
+    remote = _git_run(git_cmd, ["rev-list", "--count", f"HEAD..origin/{branch}"])
+    try:
+        local_ahead = int(local.stdout.strip()) if local.returncode == 0 else -1
+    except ValueError:
+        local_ahead = -1
+    try:
+        remote_ahead = int(remote.stdout.strip()) if remote.returncode == 0 else -1
+    except ValueError:
+        remote_ahead = -1
+    return local_ahead, remote_ahead
+
+
+def _write_diverged_rescue_ref(git_cmd, branch: str, pre_pull_sha) -> str | None:
+    """Durable backup of the pre-update local HEAD under the shared updater namespace
+    (``refs/hermes-update-backups/pre-diverged-<branch>-<ts>-<sha>``) before any
+    destructive reconciliation step. Returns the ref name (None when the SHA is
+    unknown); the write itself is best-effort but failure is always reported."""
+    if not pre_pull_sha:
+        return None
+    from datetime import datetime as _dt, timezone
+    rescue_ref = (
+        f"refs/hermes-update-backups/pre-diverged-{branch}-"
+        f"{_dt.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{pre_pull_sha[:12]}")
+    if _git_run(git_cmd, ["update-ref", rescue_ref, pre_pull_sha]).returncode == 0:
+        return rescue_ref
+    return None
+
+
+def _print_diverged_stop(rescue_ref: str | None, branch: str, pre_pull_sha,
+                         local_ahead: int, remote_ahead: int) -> None:
+    print(f"  ⚠ Branch '{branch}' has diverged from origin/{branch} "
+          f"(local ahead: {local_ahead}, remote ahead: {remote_ahead}).")
+    if rescue_ref:
+        print(f"  → Local history backed up to rescue ref: {rescue_ref}")
+    elif pre_pull_sha:
+        print(f"  ⚠ Could not write the rescue ref — recover manually from {pre_pull_sha[:12]} "
+              f"if needed (git branch rescue-{pre_pull_sha[:12]} {pre_pull_sha}).")
+    print("✗ Update aborted — committed local history was NOT reset, NOT merged, NOT discarded.")
+    print(f"  This checkout has local commits; the updater never discards them silently.")
+    print(f"  To take the upstream changes, reconcile manually, e.g.:")
+    print(f"    git merge origin/{branch}   # resolve conflicts if any, then re-run hermes update")
+    print(f"  To deliberately drop local history (explicit, manual, irreversible):")
+    print(f"    git reset --hard origin/{branch}")
+    sys.stdout.flush()
+
+
 def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha) -> None:
-    """Fast-forward failed: merge on a custom branch (local commits survive) or reset --hard on the
-    same branch (rescue ref first when histories share no ancestor). ``sys.exit(1)`` on failure."""
-    # A custom branch (local commits atop origin/<branch>) also can't ff, and reset --hard
+    """Reconcile a checkout whose ``merge --ff-only origin/<branch>`` failed.
+
+    Incident 2026-09-15: a same-branch common-ancestor divergence (local commits
+    ahead AND origin moved) was classified as an "upstream force-push" and answered
+    with ``reset --hard origin/<branch>`` — silently destroying committed local
+    history (autostash only parks the working tree, never commits). Semantics now:
+
+    - custom branch checked out → merge ``origin/<branch>``, abort on conflict
+      (unchanged; local commits survive);
+    - unfinished merge/rebase/cherry-pick/revert/bisect → refuse before any mutation;
+    - local-ahead only (origin did not move) → nothing to do, return;
+    - true divergence (both sides ahead) → write a durable rescue ref under
+      ``refs/hermes-update-backups/pre-diverged-*`` pointing at the pre-update HEAD,
+      then ``sys.exit(1)`` — never a silent reset. Taking (or discarding) upstream
+      is a manual, explicit decision;
+    - orphan history (no common ancestor) → same rescue-ref + abort (the old
+      reset-after-backup is gone: a backup nobody asked to restore is not consent).
+
+    ``sys.exit(1)`` on every refuse path.
+    """
+    _refuse_update_during_in_progress_op(git_cmd, branch)
+
+    # A custom branch (local commits atop origin/<branch>) also can't ff, and reset
     # would discard that work: merge instead, stop on conflict.
     _cur_branch = (_git_run(git_cmd, ["branch", "--show-current"]).stdout or "").strip()
     if _cur_branch and _cur_branch != branch:
@@ -731,36 +843,76 @@ def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha) -> None:
             print("  Then re-run the update. Local work is untouched.")
             sys.exit(1)
         return
-    # Same branch: a true upstream force-push/rebase; local changes are stashed, so reset.
-    # Orphan divergence (no common ancestor: corrupted HEAD, re-init) would lose the whole
-    # local graph, so park pre_pull_sha behind a rescue ref first.
+
+    local_ahead, remote_ahead = _local_remote_ahead(git_cmd, branch)
+
+    # Local commits with origin not ahead: ff-only "failed" only because HEAD is
+    # already ahead ("Already up to date" from ff-only means rc 0; a diverged local
+    # tip with a stale tracking ref can still land here). Nothing to update — keep.
+    if local_ahead >= 0 and remote_ahead == 0:
+        print(
+            f"  ℹ origin/{branch} has no new commits — keeping the {local_ahead} local "
+            f"commit(s) on '{branch}' (no reset, no merge).")
+        return
+
+    # Behind-only divergence reaching reconcile is unexpected (ff-only should
+    # have handled it); a shared-shallow edge can produce it. A plain reset is
+    # provably lossless here: no local commits to lose.
+    if local_ahead == 0 and remote_ahead > 0:
+        print("  ⚠ Fast-forward not possible (behind-only edge), resetting to match remote...")
+        reset_result = _git_run(git_cmd, ["reset", "--hard", f"origin/{branch}"])
+        if reset_result.returncode != 0:
+            print(f"✗ Failed to reset to origin/{branch}.")
+            if reset_result.stderr.strip():
+                print(f"  {reset_result.stderr.strip()}")
+            print(f"  Try manually: git fetch origin && git reset --hard origin/{branch}")
+            sys.exit(1)
+        return
+
+    # Orphan divergence (no common ancestor: corrupted HEAD, re-init): the
+    # documented self-heal (#87694, #53257) — park the whole local graph behind
+    # a rescue ref first, then reset so a broken install recovers. The backup
+    # preserves everything; bootstrap/installer scripts mirror this behavior.
     merge_base_result = _git_run(git_cmd, ["merge-base", "HEAD", f"origin/{branch}"])
     has_common_ancestor = merge_base_result.returncode == 0 and merge_base_result.stdout.strip()
-    if not has_common_ancestor and pre_pull_sha:
-        from datetime import datetime as _dt, timezone
-        # SHA suffix so two updates in the same second get distinct refs.
-        rescue_ref = (
-            f"refs/hermes-update-backups/orphan-{branch}-"
-            f"{_dt.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{pre_pull_sha[:12]}")
-        head = f"  ⚠ Local history shares no common ancestor with origin/{branch} (orphan divergence) — "
-        if _git_run(git_cmd, ["update-ref", rescue_ref, pre_pull_sha]).returncode == 0:
-            print(
-                f"{head}backed up current HEAD to {rescue_ref} before resetting. "
-                f"This backup expires after {_ORPHAN_RESCUE_REF_MAX_AGE_DAYS} days.")
-        else:
-            # update-ref failure is intentionally non-fatal, but never claim a backup exists.
-            print(
-                f"{head}attempted to back up current HEAD to {rescue_ref} before resetting, "
-                f"but the backup write failed (pre-reset SHA was {pre_pull_sha}).")
-        _prune_orphan_rescue_refs(git_cmd, _m().PROJECT_ROOT, branch)
-    print("  ⚠ Fast-forward not possible (history diverged), resetting to match remote...")
-    reset_result = _git_run(git_cmd, ["reset", "--hard", f"origin/{branch}"])
-    if reset_result.returncode != 0:
-        print(f"✗ Failed to reset to origin/{branch}.")
-        if reset_result.stderr.strip():
-            print(f"  {reset_result.stderr.strip()}")
-        print(f"  Try manually: git fetch origin && git reset --hard origin/{branch}")
-        sys.exit(1)
+    if not has_common_ancestor:
+        if pre_pull_sha:
+            from datetime import datetime as _dt, timezone
+            # SHA suffix so two updates in the same second get distinct refs.
+            rescue_ref = (
+                f"refs/hermes-update-backups/orphan-{branch}-"
+                f"{_dt.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{pre_pull_sha[:12]}")
+            head = f"  ⚠ Local history shares no common ancestor with origin/{branch} (orphan divergence) — "
+            if _git_run(git_cmd, ["update-ref", rescue_ref, pre_pull_sha]).returncode == 0:
+                print(
+                    f"{head}backed up current HEAD to {rescue_ref} before resetting. "
+                    f"This backup expires after {_ORPHAN_RESCUE_REF_MAX_AGE_DAYS} days.")
+            else:
+                # update-ref failure is intentionally non-fatal, but never claim a backup exists.
+                print(
+                    f"{head}attempted to back up current HEAD to {rescue_ref} before resetting, "
+                    f"but the backup write failed (pre-reset SHA was {pre_pull_sha}).")
+            _prune_orphan_rescue_refs(git_cmd, _m().PROJECT_ROOT, branch)
+        print("  ⚠ Fast-forward not possible (orphan divergence), resetting to match remote...")
+        reset_result = _git_run(git_cmd, ["reset", "--hard", f"origin/{branch}"])
+        if reset_result.returncode != 0:
+            print(f"✗ Failed to reset to origin/{branch}.")
+            if reset_result.stderr.strip():
+                print(f"  {reset_result.stderr.strip()}")
+            print(f"  Try manually: git fetch origin && git reset --hard origin/{branch}")
+            sys.exit(1)
+        return
+
+    # True divergence with a common ancestor (both sides ahead, counts known or
+    # unknown): the incident shape — committed local history plus upstream
+    # movement. NEVER a silent reset: write a durable rescue ref under the
+    # shared updater namespace, then abort. Taking (or discarding) upstream is
+    # a manual, explicit decision. The rescue ref is the recovery point even
+    # if a future strategy later chooses to reset.
+    rescue_ref = _write_diverged_rescue_ref(git_cmd, branch, pre_pull_sha)
+    _prune_orphan_rescue_refs(git_cmd, _m().PROJECT_ROOT, branch)
+    _print_diverged_stop(rescue_ref, branch, pre_pull_sha, local_ahead, remote_ahead)
+    sys.exit(1)
 
 
 def _rollback_if_pulled_syntax_error(git_cmd, pre_pull_sha) -> None:
