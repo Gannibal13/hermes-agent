@@ -284,7 +284,8 @@ class RouteLog:
 
     def record(
         self, route: Optional[Route], *, outcome: str, error: Any = None,
-        latency_s: Optional[float] = None,
+        latency_s: Optional[float] = None, turn_id: Optional[str] = None,
+        task_id: Optional[str] = None, api_request_id: Optional[str] = None,
     ) -> None:
         self.entries.append({
             "ts": time.time(),
@@ -294,6 +295,9 @@ class RouteLog:
             "outcome": outcome,
             "error": str(error)[:300] if error is not None else None,
             "latency_s": latency_s,
+            "turn_id": turn_id,
+            "task_id": task_id,
+            "api_request_id": api_request_id,
         })
 
     def tried_labels(self) -> List[str]:

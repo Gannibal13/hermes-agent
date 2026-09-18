@@ -1608,6 +1608,19 @@ def run_conversation(
         moa_config=moa_config,
         turn_author=turn_author,
     )
+    # Single choke point: every turn envelope passes here, so the Smart Router
+    # attempts summary is present on success and on every terminal failure path
+    # (retry exhaustion, restart-limit stop, interrupt). Keys appear only when
+    # this turn actually recorded route attempts.
+    if isinstance(result, dict):
+        try:
+            from agent.main_turn_auto_router import terminal_route_summary as _route_summary
+            _summary = _route_summary(agent)
+        except Exception:
+            _summary = {"attempts": [], "no_usable_routes": False}
+        if _summary["attempts"]:
+            result["route_attempts"] = _summary["attempts"]
+            result["no_usable_routes"] = _summary["no_usable_routes"]
     return export_current_turn_boundary(agent, result, user_message)
 
 

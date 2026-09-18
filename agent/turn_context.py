@@ -897,13 +897,16 @@ def build_turn_context(
     from tools.skill_provenance import set_review_attended
     set_review_attended(getattr(agent, "_review_attended", False))
     agent._restore_primary_runtime()
-    _publish_runtime_main(agent)
-    _refresh_mcp_tools_between_turns(agent)
 
     if isinstance(user_message, str):
         user_message = sanitize_surrogates(user_message)
     if isinstance(persist_user_message, str):
         persist_user_message = sanitize_surrogates(persist_user_message)
+
+    from agent.main_turn_auto_router import prepare_main_turn_auto_route
+    prepare_main_turn_auto_route(agent, user_message, conversation_history)
+    _publish_runtime_main(agent)
+    _refresh_mcp_tools_between_turns(agent)
 
     effective_task_id, turn_id = _bind_turn_identity(
         agent, task_id, stream_callback, persist_user_message,

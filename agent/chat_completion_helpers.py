@@ -1828,7 +1828,9 @@ def _buffer_fallback_notice(agent, notice: str) -> None:
         agent._pending_fallback_notice = [str(pending), notice] if pending else [notice]
 
 
-def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool:
+def try_activate_fallback(
+    agent, reason: "FailoverReason | None" = None, selection_reason: str | None = None,
+) -> bool:
     """Switch to the next fallback model/provider in the chain; False when exhausted. Swaps client,
     model slug and provider in place so the retry loop continues on the new backend; client
     construction goes through resolve_provider_client (no duplicated provider→key mappings)."""
@@ -1911,16 +1913,21 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             rewrite_prompt_model_identity(agent, fb_model, fb_provider)
 
             notice = (
-                f"⚠️ Model fallback: {old_model} via {old_provider} unavailable "
-                f"({_fallback_reason_text(reason)}); using {fb_model} via {fb_provider}.")
+                f"AUTO route: using {fb_model} via {fb_provider} ({selection_reason})."
+                if selection_reason
+                else f"⚠️ Model fallback: {old_model} via {old_provider} unavailable "
+                     f"({_fallback_reason_text(reason)}); using {fb_model} via {fb_provider}."
+            )
             if cooldown_seconds is not None:
                 remaining = max(0, math.ceil(agent._rate_limited_until - time.monotonic()))
                 notice += f" Primary retry eligible in ~{remaining} s; recovery is not guaranteed."
             _buffer_fallback_notice(agent, notice)
             # ``_fallback_activated`` is also reused by `/model --once` restoration; separate
             # provenance so the restore path only emits a recovery notice after a real fallback.
-            agent._provider_fallback_active = True
-            agent._provider_fallback_route = (str(fb_model), str(fb_provider))
+            agent._provider_fallback_active = not bool(selection_reason)
+            agent._provider_fallback_route = (
+                None if selection_reason else (str(fb_model), str(fb_provider))
+            )
             logger.info("Fallback activated: %s → %s (%s)", old_model, fb_model, fb_provider)
             # The stale-call streak measured the OLD provider; carrying it over would
             # short-circuit the fresh fallback before its first stream attempt.

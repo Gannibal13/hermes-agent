@@ -149,6 +149,14 @@ def perform_api_call(
         else:
             interrupted = True
         return _verdict("break")
+    from agent.main_turn_auto_router import record_main_turn_route_attempt
+    record_main_turn_route_attempt(
+        agent,
+        outcome="success",
+        turn_id=turn_id,
+        task_id=effective_task_id,
+        api_request_id=api_request_id,
+    )
     return _verdict("fallthrough")
 
 

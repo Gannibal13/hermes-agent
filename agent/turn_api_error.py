@@ -125,6 +125,15 @@ def handle_api_error(
         retry_count=retry_count, max_retries=max_retries, retryable=classified.retryable,
         reason=classified.reason.value,
     )
+    from agent.main_turn_auto_router import record_main_turn_route_attempt
+    record_main_turn_route_attempt(
+        agent,
+        outcome="failed",
+        error=api_error,
+        turn_id=turn_id,
+        task_id=effective_task_id,
+        api_request_id=api_request_id,
+    )
 
     _recovered, recovered_with_pool = recover_after_classification(
         agent, api_error, classified, _retry, status_code=status_code, error_context=error_context,
