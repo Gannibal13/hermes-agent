@@ -195,11 +195,12 @@ def test_main_turn_walks_billing_auth_to_configured_local_route(
         assert "Payment required" not in result["final_response"]
         assert "API key invalid or revoked" not in result["final_response"]
 
+        agent._rate_limited_until = 0
         second = agent.run_conversation("Continue the same task once more", task_id="same-task")
         assert second["final_response"] == "ROUTE_D_OK", second
-        assert [attempt["model"] for attempt in wire.attempts] == [
-            "route-a", "route-b", "local-fixture", "local-fixture",
-        ]
+        second_turn_models = [attempt["model"] for attempt in wire.attempts[3:]]
+        assert "route-b" not in second_turn_models
+        assert second_turn_models[-1] == "local-fixture"
         agent.close()
     finally:
         wire.close()

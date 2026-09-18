@@ -82,3 +82,66 @@ def _is_entitlement_rejected(agent, provider: str, model: str) -> bool:
         return True
     from hermes_cli.model_normalize import normalize_model_for_provider
     return (provider, normalize_model_for_provider(model, provider)) in rejected
+
+
+def _credential_fingerprint(agent, api_key: object = None) -> int:
+    """Identify the active credential without retaining secret material."""
+    credential = getattr(agent, "api_key", "") if api_key is None else api_key
+    return hash(str(credential or ""))
+
+
+def _mark_auth_failed_route(agent, reason: "FailoverReason | None") -> bool:
+    """Quarantine an exact route after credential recovery failed for this session."""
+    if reason not in {FailoverReason.auth, FailoverReason.auth_permanent}:
+        return False
+    from agent.backend_identity import BackendIdentity
+
+    identity = BackendIdentity.build(
+        provider=getattr(agent, "provider", ""),
+        model=getattr(agent, "model", ""),
+        base_url=str(getattr(agent, "base_url", "") or ""),
+    )
+    if not identity.provider or not identity.model:
+        return False
+    rejected = getattr(agent, "_auth_failed_routes", None)
+    if rejected is None:
+        rejected = agent._auth_failed_routes = {}
+    cooldown = float(getattr(agent, "_auth_failure_cooldown_seconds", 0) or 0)
+    expires_at = time.monotonic() + cooldown if cooldown > 0 else None
+    rejected[identity] = (_credential_fingerprint(agent), expires_at)
+    logger.warning(
+        "Authentication rejection: treating %s/%s at %s as unavailable for this session",
+        identity.provider,
+        identity.model,
+        identity.base_url or "default endpoint",
+    )
+    return True
+
+
+def _is_auth_failed_route(
+    agent, provider: str, model: str, base_url: str = "", api_key: object = None,
+) -> bool:
+    """Return whether the exact route is quarantined for the unchanged credential."""
+    rejected = getattr(agent, "_auth_failed_routes", None)
+    if not rejected:
+        return False
+    from agent.backend_identity import BackendIdentity
+
+    identity = BackendIdentity.build(provider=provider, model=model, base_url=base_url)
+    try:
+        record = rejected.get(identity)
+    except AttributeError:
+        return False
+    if record is None:
+        return False
+    try:
+        fingerprint, expires_at = record
+    except (TypeError, ValueError):
+        return False
+    if api_key is not None and fingerprint != _credential_fingerprint(agent, api_key):
+        rejected.pop(identity, None)
+        return False
+    if expires_at is not None and time.monotonic() >= expires_at:
+        rejected.pop(identity, None)
+        return False
+    return True

@@ -175,6 +175,31 @@ def _fallback_entry_for_route(agent: Any, route: Route) -> Dict[str, Any]:
     return entry
 
 
+def _append_local_last_reserve(agent: Any, routes: Sequence[Route]) -> List[Route]:
+    """Keep one configured local endpoint as the final AUTO fallback."""
+    from agent.model_metadata import is_local_endpoint
+
+    def is_local(route: Route) -> bool:
+        return bool(route.local or (route.base_url and is_local_endpoint(route.base_url)))
+
+    ordered = list(routes)
+    if any(is_local(route) for route in ordered):
+        return ordered
+    current = Route(
+        provider=str(getattr(agent, "provider", "") or ""),
+        model=str(getattr(agent, "model", "") or ""),
+        base_url=str(getattr(agent, "base_url", "") or "") or None,
+    )
+    if is_local(current):
+        return ordered
+    existing = {_route_key(route) for route in ordered}
+    for route in candidates_from_parent(agent):
+        if is_local(route) and _route_key(route) not in existing:
+            ordered.append(route)
+            break
+    return ordered
+
+
 def record_main_turn_route_attempt(
     agent: Any, *, outcome: str, error: Any = None, turn_id: Any = None,
     task_id: Any = None, api_request_id: Any = None,
@@ -349,6 +374,7 @@ def prepare_main_turn_auto_route(
     )
     selected_key = _route_key(decision.route)
     execution_order = ordered[1:] if selected_key == current_key else ordered
+    execution_order = _append_local_last_reserve(agent, execution_order)
     previous_chain = list(getattr(agent, "_fallback_chain", None) or [])
     previous_index = int(getattr(agent, "_fallback_index", 0) or 0)
     agent._fallback_chain = [

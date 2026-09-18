@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from agent.error_classifier import FailoverReason
+from agent.fallback_cooldown import _is_auth_failed_route, _mark_auth_failed_route
 from agent.main_turn_auto_router import (
     initialize_main_turn_auto_routes,
     plan_main_turn_routes,
@@ -82,6 +84,64 @@ def test_auto_plan_escalates_complex_turn_then_deescalates_on_fallback():
     # Then: it escalates to strong first and de-escalates to cheap if execution falls through.
     assert decision.route is not None
     assert [route.model for route in ordered] == ["gpt-5.6-sol", "local-mini"]
+
+
+def test_auto_execution_keeps_configured_local_route_as_final_reserve():
+    # Given: AUTO's frozen pool lost a configured local entry before turn planning.
+    local_entry = {
+        "provider": "local-runtime",
+        "model": "local-mini",
+        "base_url": "http://127.0.0.1:11434/v1",
+        "local": True,
+    }
+    agent = _agent(
+        requested_provider="auto",
+        provider="openai-codex",
+        model="gpt-5.6-sol",
+        fallbacks=[local_entry],
+    )
+    initialize_main_turn_auto_routes(agent)
+    agent._main_turn_auto_routes = (
+        Route(provider="cloud-a", model="cloud-a-model"),
+        Route(provider="cloud-b", model="cloud-b-model"),
+    )
+
+    # When: turn planning freezes a cloud-only execution order.
+    with patch("agent.chat_completion_helpers.try_activate_fallback", return_value=True):
+        prepare_main_turn_auto_route(agent, "Investigate the production failure", [])
+
+    # Then: the configured local route remains the last-reserve fallback.
+    assert agent._fallback_chain[-1] == local_entry
+
+
+def test_auth_failed_route_quarantine_is_exact_and_reopens_on_change_or_expiry():
+    agent = SimpleNamespace(
+        provider="cloud",
+        model="model",
+        base_url="https://first.example/v1",
+        api_key="old-key",
+        _auth_failure_cooldown_seconds=10,
+    )
+    with patch("agent.fallback_cooldown.time.monotonic", return_value=100):
+        assert _mark_auth_failed_route(agent, FailoverReason.auth_permanent)
+
+    with patch("agent.fallback_cooldown.time.monotonic", return_value=105):
+        assert _is_auth_failed_route(
+            agent, "cloud", "model", "https://first.example/v1", "old-key",
+        )
+        assert not _is_auth_failed_route(
+            agent, "cloud", "model", "https://second.example/v1", "old-key",
+        )
+        assert not _is_auth_failed_route(
+            agent, "cloud", "model", "https://first.example/v1", "new-key",
+        )
+
+    with patch("agent.fallback_cooldown.time.monotonic", return_value=100):
+        assert _mark_auth_failed_route(agent, FailoverReason.auth_permanent)
+    with patch("agent.fallback_cooldown.time.monotonic", return_value=111):
+        assert not _is_auth_failed_route(
+            agent, "cloud", "model", "https://first.example/v1", "old-key",
+        )
 
 
 def test_explicit_provider_pin_never_enters_main_turn_auto_routing():

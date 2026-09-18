@@ -1129,6 +1129,15 @@ def restore_primary_runtime(agent) -> bool:
         # Stay on the fallback; the user sees the terminal entitlement error instead.
         return False
     primary_runtime_base_url = str((rt or {}).get("base_url") or "")
+    from agent.fallback_cooldown import _is_auth_failed_route
+    if primary_model and _is_auth_failed_route(
+        agent,
+        primary_provider,
+        primary_model,
+        primary_runtime_base_url,
+        (rt or {}).get("api_key"),
+    ):
+        return False
 
     def _matches_primary(candidate) -> bool:
         return credential_pool_matches_provider(candidate, primary_provider, base_url=primary_runtime_base_url)

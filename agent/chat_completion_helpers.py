@@ -1738,6 +1738,16 @@ def _should_skip_fallback_candidate(agent, fb: dict, fb_key: tuple, fb_provider:
     if _is_entitlement_rejected(agent, fb_provider, fb_model):
         logger.info("Fallback skip: %s/%s was rejected as unentitled for this account", fb_provider, fb_model)
         return True
+    from agent.fallback_cooldown import _is_auth_failed_route
+    if _is_auth_failed_route(
+        agent,
+        fb_provider,
+        fb_model,
+        str(fb.get("base_url") or ""),
+        fb.get("api_key"),
+    ):
+        logger.info("Fallback skip: %s/%s has a confirmed authentication failure", fb_provider, fb_model)
+        return True
     local_skip_reason = _fallback_entry_unavailable_without_network(agent, fb)
     if local_skip_reason:
         unavailable.add(fb_key)
@@ -1834,7 +1844,8 @@ def try_activate_fallback(
     """Switch to the next fallback model/provider in the chain; False when exhausted. Swaps client,
     model slug and provider in place so the retry loop continues on the new backend; client
     construction goes through resolve_provider_client (no duplicated provider→key mappings)."""
-    from agent.fallback_cooldown import _arm_rate_limit_cooldown
+    from agent.fallback_cooldown import _arm_rate_limit_cooldown, _mark_auth_failed_route
+    _mark_auth_failed_route(agent, reason)
     cooldown_seconds = _arm_rate_limit_cooldown(agent, reason)
     while True:
         if agent._fallback_index >= len(agent._fallback_chain):
