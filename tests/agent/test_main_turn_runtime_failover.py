@@ -206,6 +206,115 @@ def test_main_turn_walks_billing_auth_to_configured_local_route(
         wire.close()
 
 
+def test_third_cloud_success_leaves_local_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wire = _FailoverWire({
+        "route-a": 402,
+        "route-b": 401,
+        "route-c": 200,
+        "local-fixture": 200,
+    })
+    try:
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            monkeypatch.delenv(name, raising=False)
+        agent = AIAgent(
+            base_url=wire.base_url,
+            api_key="test-key",
+            provider="custom",
+            requested_provider="auto",
+            api_mode="chat_completions",
+            model="route-a",
+            enabled_toolsets=[],
+            quiet_mode=True,
+            skip_memory=True,
+            skip_context_files=True,
+            skip_background_review=True,
+            max_iterations=5,
+            fallback_model=[
+                {"provider": "custom", "model": "route-b", "base_url": wire.base_url, "api_key": "test-key", "cost_per_1k": 0.1},
+                {"provider": "custom", "model": "route-c", "base_url": wire.base_url, "api_key": "test-key", "cost_per_1k": 0.2},
+                {"provider": "lmstudio", "model": "local-fixture", "base_url": wire.base_url, "api_key": "test-key", "cost_per_1k": 1.0, "local": True},
+            ],
+        )
+        agent._disable_streaming = True
+        agent._api_max_retries = 2
+
+        result = agent.run_conversation("Continue through the first usable cloud route", task_id="same-task")
+
+        assert result["final_response"] == "ROUTE_D_OK", result
+        assert [attempt["model"] for attempt in wire.attempts] == ["route-a", "route-b", "route-c"]
+        assert all(attempt["model"] != "local-fixture" for attempt in wire.attempts)
+        assert agent.model == "route-c"
+        attempts = agent._main_turn_route_log.entries
+        assert any(e["model"] == "route-a" and "402" in str(e["error"]) for e in attempts)
+        assert any(e["model"] == "route-b" and "401" in str(e["error"]) for e in attempts)
+        assert result.get("no_usable_routes") is not True
+        agent.close()
+    finally:
+        wire.close()
+
+
+def test_external_opencode_failure_continues_to_local(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wire = _FailoverWire({
+        "route-a": 402,
+        "test-opencode-model": 401,
+        "local-fixture": 200,
+    })
+    try:
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            monkeypatch.delenv(name, raising=False)
+        agent = AIAgent(
+            base_url=wire.base_url,
+            api_key="test-key",
+            provider="custom",
+            requested_provider="auto",
+            api_mode="chat_completions",
+            model="route-a",
+            enabled_toolsets=[],
+            quiet_mode=True,
+            skip_memory=True,
+            skip_context_files=True,
+            skip_background_review=True,
+            max_iterations=5,
+            fallback_model=[
+                {"provider": "opencode-zen", "model": "test-opencode-model", "base_url": wire.base_url, "api_key": "test-key", "cost_per_1k": 0.1},
+                {"provider": "lmstudio", "model": "local-fixture", "base_url": wire.base_url, "api_key": "test-key", "cost_per_1k": 1.0, "local": True},
+            ],
+        )
+        agent._disable_streaming = True
+        agent._api_max_retries = 2
+
+        result = agent.run_conversation("Continue through the configured local route", task_id="same-task")
+
+        assert result["final_response"] == "ROUTE_D_OK", result
+        assert [attempt["model"] for attempt in wire.attempts] == [
+            "route-a", "test-opencode-model", "local-fixture",
+        ]
+        assert agent.model == "local-fixture"
+        attempts = agent._main_turn_route_log.entries
+        assert any(e["model"] == "route-a" and "402" in str(e["error"]) for e in attempts)
+        assert any(
+            e["model"] == "test-opencode-model"
+            and "401" in str(e["error"])
+            and "invalid or revoked" in str(e["error"]).lower()
+            for e in attempts
+        )
+        assert result.get("no_usable_routes") is not True
+
+        agent._rate_limited_until = 0
+        second = agent.run_conversation("Continue the same task once more", task_id="same-task")
+        assert second["final_response"] == "ROUTE_D_OK", second
+        second_turn_models = [attempt["model"] for attempt in wire.attempts[3:]]
+        assert "test-opencode-model" not in second_turn_models
+        assert second_turn_models[-1] == "local-fixture"
+        agent.close()
+    finally:
+        wire.close()
+
+
 def test_all_routes_fail_returns_structured_no_usable_routes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
