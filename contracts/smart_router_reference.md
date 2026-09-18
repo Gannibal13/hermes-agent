@@ -120,8 +120,8 @@ Asserts: все маршруты мертвы / цепочка пуста → и
 ## [P17] Большой контекст: compaction → switch в ТОМ ЖЕ turn
 Status: CLOSED
 Evidence:
-- LARGE_CONTEXT_COMPACTION_SWITCH_E2E: tests/agent/test_main_turn_route_fit_compaction.py::test_a1_compact_then_switch_same_turn
-- LARGE_CONTEXT_STILL_TOO_LARGE_NEXT_ROUTE: tests/agent/test_main_turn_route_fit_compaction.py::test_a2_preferred_insufficient_next_route_serves
+- LARGE_CONTEXT_COMPACTION_SWITCH_E2E: tests/agent/test_main_turn_route_fit_compaction.py::test_a1_compaction_switches_route_same_turn
+- LARGE_CONTEXT_STILL_TOO_LARGE_NEXT_ROUTE: tests/agent/test_main_turn_route_fit_compaction.py::test_a2_still_too_large_skips_to_next_route
 Asserts: production-like runtime path — активный (не кумулятивный) контекст не лезет в preferred route → вызывается СУЩЕСТВУЮЩИЙ компрессор (`agent._compress_context`, не второй compressor) → route chain пересчитывается ПОСЛЕ compaction → selected route меняется → тот же turn завершается SUCCESS без manual confirmation и без Turn failed. A2: после compaction preferred всё ещё не помещается → CONTEXT_INSUFFICIENT → skip → следующий usable route обслуживает тот же turn.
 Acceptance: unit/mock-тесты вокруг selector (в т.ч. filter_context_before_routing) НЕ закрывают P17 — требуется production-like E2E через run_conversation с реальной compressor-фасадой. Гейт должен FAIL при отсутствии этого evidence.
 

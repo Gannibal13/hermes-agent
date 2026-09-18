@@ -155,36 +155,39 @@ def run_desktop_vitest(spec_paths):
     {spec_file: PASSED|FAILED}; a runner crash yields FAILED for every spec.
     """
     specs = sorted(set(spec_paths))
-    out_file = REPO / ".gate-vitest-results.json"
-    cmd = ["npx", "vitest", "run", "--reporter=json", "--output",
-           str(out_file), *specs]
-    proc = subprocess.run(cmd, cwd=str(REPO / "apps" / "desktop"),
+    import shutil
+    npx = shutil.which("npx") or shutil.which("npx.cmd") or "npx"
+    # vitest 4 dropped --output for the JSON reporter; JSON goes to stdout.
+    # Spec paths in the contract are repo-root-relative, so translate to
+    # cwd-relative (cwd is apps/desktop) for the runner.
+    desktop = REPO / "apps" / "desktop"
+    def _spec_arg(spec: str) -> str:
+        # Contract stores repo-root-relative paths; strip the apps/desktop/
+        # prefix so the runner (cwd=apps/desktop) matches the file.
+        prefix = "apps/desktop/"
+        rel = spec[len(prefix):] if spec.startswith(prefix) else spec
+        return rel.replace("/", "\\")
+    cmd = [npx, "vitest", "run", "--reporter=json",
+           *(_spec_arg(s) for s in specs)]
+    proc = subprocess.run(cmd, cwd=str(desktop),
                           capture_output=True, text=True,
                           encoding="utf-8", errors="replace")
     results = {}
+    verdict = "FAILED"
     try:
-        data = json.loads(out_file.read_text(encoding="utf-8"))
+        data = json.loads(proc.stdout[proc.stdout.find("{"):])
         total = int(data.get("numTotalTests", 0))
         failed = int(data.get("numFailedTests", 0))
         passed = int(data.get("numPassedTests", 0))
-        if total == failed + passed:
-            for spec in specs:
-                # Key with the contract's DESKTOP_VITEST: prefix so the gate's
-                # union/missing bookkeeping (which stores prefixed nodeids)
-                # matches these entries verbatim.
-                results[f"DESKTOP_VITEST:{spec}"] = (
-                    "PASSED" if failed == 0 else "FAILED")
-        else:
-            for spec in specs:
-                results[f"DESKTOP_VITEST:{spec}"] = "FAILED"  # skipped/pending not passed
+        if proc.returncode == 0 and total > 0 and total == failed + passed:
+            verdict = "PASSED" if failed == 0 else "FAILED"
     except Exception:
-        for spec in specs:
-            results[f"DESKTOP_VITEST:{spec}"] = "FAILED"
-    finally:
-        try:
-            out_file.unlink()
-        except OSError:
-            pass
+        verdict = "FAILED"
+    for spec in specs:
+        # Key with the contract's DESKTOP_VITEST: prefix so the gate's
+        # union/missing bookkeeping (which stores prefixed nodeids)
+        # matches these entries verbatim.
+        results[f"DESKTOP_VITEST:{spec}"] = verdict
     return results
 
 
