@@ -245,7 +245,11 @@ def terminal_route_summary(agent: Any) -> Dict[str, Any]:
         index = int(getattr(agent, "_fallback_index", 0) or 0)
     except (TypeError, ValueError):
         index = 0
-    exhausted = bool(attempts) and index >= len(chain)
+    exhausted = (
+        bool(attempts)
+        and attempts[-1].get("outcome") != "success"
+        and index >= len(chain)
+    )
     return {"attempts": attempts, "no_usable_routes": exhausted}
 
 

@@ -37,8 +37,16 @@ class _FailoverWire:
                 payload = (
                     {
                         "error": {
-                            "message": "Payment required" if status == 402 else "Rate limit exceeded",
-                            "type": "billing_error" if status == 402 else "rate_limit_error",
+                            "message": (
+                                "Payment required" if status == 402
+                                else "API key invalid or revoked" if status == 401
+                                else "Rate limit exceeded"
+                            ),
+                            "type": (
+                                "billing_error" if status == 402
+                                else "authentication_error" if status == 401
+                                else "rate_limit_error"
+                            ),
                         }
                     }
                     if status != 200
@@ -143,6 +151,58 @@ def test_main_turn_walks_real_adapter_chain_to_route_d(
     assert {entry["task_id"] for entry in agent._main_turn_route_log.entries} == {"same-task"}
     assert agent._rate_limit_backoff_count >= 1
     agent.close()
+
+
+def test_main_turn_walks_billing_auth_to_configured_local_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production-like supervisor path: 402 and auth failure are internal; local wins."""
+    wire = _FailoverWire({"route-a": 402, "route-b": 401, "local-fixture": 200})
+    try:
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            monkeypatch.delenv(name, raising=False)
+        agent = AIAgent(
+            base_url=wire.base_url,
+            api_key="test-key",
+            provider="custom",
+            requested_provider="auto",
+            api_mode="chat_completions",
+            model="route-a",
+            enabled_toolsets=[],
+            quiet_mode=True,
+            skip_memory=True,
+            skip_context_files=True,
+            skip_background_review=True,
+            max_iterations=5,
+            fallback_model=[
+                {"provider": "custom", "model": "route-b", "base_url": wire.base_url, "api_key": "test-key", "cost_per_1k": 0.1},
+                {"provider": "lmstudio", "model": "local-fixture", "base_url": wire.base_url, "api_key": "", "cost_per_1k": 1.0, "local": True},
+            ],
+        )
+        agent._disable_streaming = True
+        agent._api_max_retries = 2
+
+        result = agent.run_conversation("Continue the same task using the available local route", task_id="same-task")
+
+        assert result["final_response"] == "ROUTE_D_OK", result
+        assert [attempt["model"] for attempt in wire.attempts] == ["route-a", "route-b", "local-fixture"]
+        assert agent.model == "local-fixture"
+        attempts = agent._main_turn_route_log.entries
+        assert any(e["model"] == "route-a" and "402" in str(e["error"]) for e in attempts)
+        assert any(e["model"] == "route-b" and "401" in str(e["error"]) for e in attempts)
+        assert attempts[-1]["outcome"] == "success"
+        assert result.get("no_usable_routes") is not True
+        assert "Payment required" not in result["final_response"]
+        assert "API key invalid or revoked" not in result["final_response"]
+
+        second = agent.run_conversation("Continue the same task once more", task_id="same-task")
+        assert second["final_response"] == "ROUTE_D_OK", second
+        assert [attempt["model"] for attempt in wire.attempts] == [
+            "route-a", "route-b", "local-fixture", "local-fixture",
+        ]
+        agent.close()
+    finally:
+        wire.close()
 
 
 def test_all_routes_fail_returns_structured_no_usable_routes(

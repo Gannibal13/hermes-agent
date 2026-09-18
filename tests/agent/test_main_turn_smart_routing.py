@@ -180,7 +180,7 @@ def test_terminal_summary_reports_attempts_and_exhaustion():
     agent._fallback_chain = [{"provider": "a", "model": "m-a"}]
     agent._fallback_index = 1
     summary = terminal_route_summary(agent)
-    assert summary["no_usable_routes"] is True
+    assert summary["no_usable_routes"] is False
     assert [(a["provider"], a["model"], a["outcome"]) for a in summary["attempts"]] == [
         ("a", "m-a", "failed"), ("b", "m-b", "success"),
     ]
