@@ -246,3 +246,36 @@ def test_terminal_summary_reports_attempts_and_exhaustion():
     ]
     assert all(set(a) == {"provider", "model", "outcome", "error"} for a in summary["attempts"])
     assert "sk-" not in str(summary)
+
+
+def test_simple_task_prefers_cheap_cloud_over_local_on_cost_tie():
+    # Given: healthy cheap cloud, healthy strong cloud, healthy local — all at tied/ordered costs.
+    routes = [
+        Route(provider="cloud", model="cloud-flash-x", cost_per_1k=0.0),
+        Route(provider="cloud", model="cloud-reasoning-x", cost_per_1k=1.0),
+        Route(provider="lmstudio", model="local-mini", base_url="http://127.0.0.1:11434/v1", cost_per_1k=0.0, local=True),
+    ]
+
+    # When: a simple mechanical task is planned.
+    decision, ordered = plan_main_turn_routes(routes, "Fix typo in README", [])
+
+    # Then: cheapest sufficient healthy CLOUD route first; local strictly after clouds.
+    assert decision.route is not None
+    assert decision.route.model == "cloud-flash-x"
+    assert [r.model for r in ordered] == ["cloud-flash-x", "local-mini", "cloud-reasoning-x"]
+
+    # When: a genuinely complex task is planned over the same pool.
+    cdecision, cordered = plan_main_turn_routes(
+        routes, "Root cause the distributed deadlock and prove the fix", [],
+    )
+
+    # Then: sufficient stronger cloud escalates first.
+    assert cdecision.route is not None
+    assert cordered[0].model == "cloud-reasoning-x"
+
+    # When: the next task is simple again.
+    ddecision, _ = plan_main_turn_routes(routes, "Fix another typo", [])
+
+    # Then: planning de-escalates back to the cheap cloud, never stuck on strong or local.
+    assert ddecision.route is not None
+    assert ddecision.route.model == "cloud-flash-x"

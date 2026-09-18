@@ -366,3 +366,147 @@ def test_all_routes_fail_returns_structured_no_usable_routes(
         agent.close()
     finally:
         wire.close()
+
+
+def test_multi_cloud_before_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cloud A 402, B AUTH, C 429, D success: local stays untouched."""
+    wire = _FailoverWire({"route-a": 402, "route-b": 401, "route-c": 429, "route-d": 200, "local-fixture": 200})
+    try:
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            monkeypatch.delenv(name, raising=False)
+        agent = AIAgent(
+            base_url=wire.base_url,
+            api_key="test-key",
+            provider="custom",
+            requested_provider="auto",
+            api_mode="chat_completions",
+            model="route-a",
+            enabled_toolsets=[],
+            quiet_mode=True,
+            skip_memory=True,
+            skip_context_files=True,
+            skip_background_review=True,
+            max_iterations=6,
+            fallback_model=[
+                {"provider": "custom", "model": "route-b", "base_url": wire.base_url, "api_key": "test-key", "cost_per_1k": 0.1},
+                {"provider": "custom", "model": "route-c", "base_url": wire.base_url, "api_key": "test-key", "cost_per_1k": 0.2},
+                {"provider": "custom", "model": "route-d", "base_url": wire.base_url, "api_key": "test-key", "cost_per_1k": 0.3},
+                {"provider": "lmstudio", "model": "local-fixture", "base_url": wire.base_url, "api_key": "test-key", "cost_per_1k": 1.0, "local": True},
+            ],
+        )
+        agent._disable_streaming = True
+        agent._api_max_retries = 4
+
+        result = agent.run_conversation("Continue through the first usable cloud route", task_id="same-task")
+
+        assert result["final_response"] == "ROUTE_D_OK", result
+        assert [attempt["model"] for attempt in wire.attempts] == ["route-a", "route-b", "route-c", "route-d"]
+        assert all(attempt["model"] != "local-fixture" for attempt in wire.attempts)
+        assert agent.model == "route-d"
+        attempts = agent._main_turn_route_log.entries
+        assert any(e["model"] == "route-a" and "402" in str(e["error"]) for e in attempts)
+        assert any(e["model"] == "route-b" and "401" in str(e["error"]) for e in attempts)
+        assert any(e["model"] == "route-c" and "429" in str(e["error"]) for e in attempts)
+        assert attempts[-1]["outcome"] == "success"
+        assert result.get("no_usable_routes") is not True
+        assert "Payment required" not in result["final_response"]
+        assert "API key invalid or revoked" not in result["final_response"]
+        assert "Rate limit exceeded" not in result["final_response"]
+        assert {entry["task_id"] for entry in attempts} == {"same-task"}
+        agent.close()
+    finally:
+        wire.close()
+
+
+def test_cloud_exhausted_reaches_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cloud A 402, B AUTH, C 429, D offline: same task still lands on local."""
+    wire = _FailoverWire({"route-a": 402, "route-b": 401, "route-c": 429, "local-fixture": 200})
+    try:
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            monkeypatch.delenv(name, raising=False)
+        agent = AIAgent(
+            base_url=wire.base_url,
+            api_key="test-key",
+            provider="custom",
+            requested_provider="auto",
+            api_mode="chat_completions",
+            model="route-a",
+            enabled_toolsets=[],
+            quiet_mode=True,
+            skip_memory=True,
+            skip_context_files=True,
+            skip_background_review=True,
+            max_iterations=6,
+            fallback_model=[
+                {"provider": "custom", "model": "route-b", "base_url": wire.base_url, "api_key": "test-key", "cost_per_1k": 0.1},
+                {"provider": "custom", "model": "route-c", "base_url": wire.base_url, "api_key": "test-key", "cost_per_1k": 0.2},
+                {"provider": "custom", "model": "route-d", "base_url": _closed_loopback_url(), "api_key": "test-key", "cost_per_1k": 0.3},
+                {"provider": "lmstudio", "model": "local-fixture", "base_url": wire.base_url, "api_key": "test-key", "cost_per_1k": 1.0, "local": True},
+            ],
+        )
+        agent._disable_streaming = True
+        agent._api_max_retries = 4
+
+        result = agent.run_conversation("Reach the local reserve after every cloud fails", task_id="same-task")
+
+        assert result["final_response"] == "ROUTE_D_OK", result
+        assert [attempt["model"] for attempt in wire.attempts] == ["route-a", "route-b", "route-c", "local-fixture"]
+        assert agent.model == "local-fixture"
+        attempts = agent._main_turn_route_log.entries
+        assert "route-d" in [e["model"] for e in attempts]
+        assert any(e["model"] == "route-a" and "402" in str(e["error"]) for e in attempts)
+        assert any(e["model"] == "route-b" and "401" in str(e["error"]) for e in attempts)
+        assert attempts[-1]["outcome"] == "success"
+        assert result.get("no_usable_routes") is not True
+        assert "Payment required" not in result["final_response"]
+        assert "API key invalid or revoked" not in result["final_response"]
+        assert {entry["task_id"] for entry in attempts} == {"same-task"}
+        agent.close()
+    finally:
+        wire.close()
+
+
+def test_opencode_failure_continues_to_next_cloud(monkeypatch: pytest.MonkeyPatch) -> None:
+    """External OpenCode route fails: supervisor continues to next cloud, local untouched."""
+    wire = _FailoverWire({"route-a": 402, "test-opencode-model-3": 401, "route-c": 200, "local-fixture": 200})
+    try:
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            monkeypatch.delenv(name, raising=False)
+        agent = AIAgent(
+            base_url=wire.base_url,
+            api_key="test-key",
+            provider="custom",
+            requested_provider="auto",
+            api_mode="chat_completions",
+            model="route-a",
+            enabled_toolsets=[],
+            quiet_mode=True,
+            skip_memory=True,
+            skip_context_files=True,
+            skip_background_review=True,
+            max_iterations=6,
+            fallback_model=[
+                {"provider": "opencode-zen", "model": "test-opencode-model-3", "base_url": wire.base_url, "api_key": "test-key", "cost_per_1k": 0.1},
+                {"provider": "custom", "model": "route-c", "base_url": wire.base_url, "api_key": "test-key", "cost_per_1k": 0.2},
+                {"provider": "lmstudio", "model": "local-fixture", "base_url": wire.base_url, "api_key": "test-key", "cost_per_1k": 1.0, "local": True},
+            ],
+        )
+        agent._disable_streaming = True
+        agent._api_max_retries = 4
+
+        result = agent.run_conversation("Continue past the failed external code-agent route", task_id="same-task")
+
+        assert result["final_response"] == "ROUTE_D_OK", result
+        assert [attempt["model"] for attempt in wire.attempts] == ["route-a", "test-opencode-model-3", "route-c"]
+        assert all(attempt["model"] != "local-fixture" for attempt in wire.attempts)
+        assert agent.model == "route-c"
+        attempts = agent._main_turn_route_log.entries
+        assert any(e["model"] == "route-a" and "402" in str(e["error"]) for e in attempts)
+        assert any(e["model"] == "test-opencode-model-3" and "401" in str(e["error"]) for e in attempts)
+        assert attempts[-1]["outcome"] == "success"
+        assert result.get("no_usable_routes") is not True
+        assert "API key invalid or revoked" not in result["final_response"]
+        assert {entry["task_id"] for entry in attempts} == {"same-task"}
+        agent.close()
+    finally:
+        wire.close()

@@ -62,6 +62,7 @@ def plan_main_turn_routes(
     while remaining:
         decision = select_route(
             remaining, complexity=complexity, need_tokens=need_tokens,
+            prefer_local=False,
         )
         if decision.route is None:
             if first_decision is None:
@@ -352,6 +353,7 @@ def prepare_main_turn_auto_route(
     preferred = select_route(
         candidates, complexity=classify_task_complexity(goal_text),
         need_tokens=goal_tokens,
+        prefer_local=False,
     ).route
     if (
         preferred is not None
