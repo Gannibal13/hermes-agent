@@ -905,6 +905,15 @@ def build_turn_context(
 
     from agent.main_turn_auto_router import prepare_main_turn_auto_route
     prepare_main_turn_auto_route(agent, user_message, conversation_history)
+    # Route-fit compaction replaced the ACTIVE context: the rest of this turn
+    # (messages copy, staging, preflight, persistence) must run on the compacted
+    # list, not the pre-compaction one. Same rebind pattern run_turn_start_compaction
+    # uses below via CompactionOutcome.conversation_history.
+    _route_compacted = getattr(agent, "_main_turn_route_compacted_context", None)
+    if _route_compacted is not None:
+        agent._main_turn_route_compacted_context = None
+        if conversation_history is not None:
+            conversation_history = _route_compacted
     _publish_runtime_main(agent)
     _refresh_mcp_tools_between_turns(agent)
 

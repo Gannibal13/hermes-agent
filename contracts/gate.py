@@ -30,6 +30,7 @@ first evidence item and requires exit 1 + FINAL FORBIDDEN naming it.
 """
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -38,6 +39,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 ITEM_RE = re.compile(r"^## \[([A-Z]+\d*)\]\s+(.*)$")
 MIN_RE = re.compile(r"^MinEvidenceItems:\s*(\d+)", re.MULTILINE)
+# Keyed evidence line: "- SOME_REQUIREMENT_KEY: tests/...::test_x" or
+# "- SOME_REQUIREMENT_KEY: DESKTOP_VITEST:apps/desktop/src/...test.tsx"
+KEYED_RE = re.compile(r"^-\s+([A-Z][A-Z0-9_]+):\s+(tests/\S+|DESKTOP_VITEST:\S+)$")
 RESULT_RE = re.compile(r"^(\S+::\S+) (PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)")
 
 
@@ -58,7 +62,8 @@ def parse_contract(path):
         if im:
             current = im.group(1)
             items[current] = {"title": im.group(2), "status": "",
-                              "nodeids": [], "gate": "", "asserts": ""}
+                              "nodeids": [], "gate": "", "asserts": "",
+                              "keyed": set()}
             in_evidence = False
             in_amend = (current == "Amendments" or
                         s.lower().startswith("## [amend"))
@@ -90,9 +95,40 @@ def parse_contract(path):
             items[current]["nodeids"].append(s[2:].strip())
         elif in_evidence and s.startswith("- GATE:"):
             items[current]["gate"] = s.split("GATE:", 1)[1].strip()
+        elif in_evidence and KEYED_RE.match(s):
+            # Keyed evidence: "- EVIDENCE_KEY: tests/..." — the key names the
+            # requirement (e.g. LARGE_CONTEXT_COMPACTION_SWITCH_E2E); the
+            # nodeid after the colon is executed like any other. Gate sections
+            # REQUIRED_EVIDENCE_KEYS below fail closed when a listed key is
+            # absent from the contract, so a unit test cannot silently stand in
+            # for a keyed E2E requirement.
+            items[current]["nodeids"].append(KEYED_RE.match(s).group(2))
+            items[current]["keyed"].add(KEYED_RE.match(s).group(1))
         elif in_evidence and s and not s.startswith("-"):
             in_evidence = False
     return items, amendments, floor
+
+
+# Keyed evidence that MUST exist in the contract (fail closed). Each key here
+# binds a named acceptance requirement to a real executable nodeid; removing
+# the key or its nodeid (e.g. replacing the P17 E2E with a selector unit test)
+# makes the gate FAIL instead of quietly passing.
+REQUIRED_EVIDENCE_KEYS = {
+    "LARGE_CONTEXT_COMPACTION_SWITCH_E2E",
+    "LARGE_CONTEXT_STILL_TOO_LARGE_NEXT_ROUTE",
+    "FREE_MODEL_DESKTOP_PICKER_RENDER",
+}
+
+
+def check_required_keys(items):
+    """Fail-closed keyed-evidence check. Returns a list of violations."""
+    violations = []
+    for key in sorted(REQUIRED_EVIDENCE_KEYS):
+        owners = [iid for iid, it in items.items() if key in it.get("keyed", ())]
+        if not owners:
+            violations.append(
+                f"missing keyed evidence: {key} (no item carries '- {key}: tests/...')")
+    return violations
 
 
 def run_pytest(nodeids):
@@ -105,6 +141,50 @@ def run_pytest(nodeids):
         m = RESULT_RE.match(line.strip())
         if m:
             results[m.group(1)] = m.group(2)
+    return results
+
+
+VITEST_RE = re.compile(r"^DESKTOP_VITEST:(.+)$")
+
+
+def run_desktop_vitest(spec_paths):
+    """Run the repo's desktop vitest specs; map file results into the gate.
+
+    vitest reports per-file pass/fail (JSON reporter, --reporter=json --output).
+    Each spec file is reported as one nodeid (the file itself). Returns
+    {spec_file: PASSED|FAILED}; a runner crash yields FAILED for every spec.
+    """
+    specs = sorted(set(spec_paths))
+    out_file = REPO / ".gate-vitest-results.json"
+    cmd = ["npx", "vitest", "run", "--reporter=json", "--output",
+           str(out_file), *specs]
+    proc = subprocess.run(cmd, cwd=str(REPO / "apps" / "desktop"),
+                          capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+    results = {}
+    try:
+        data = json.loads(out_file.read_text(encoding="utf-8"))
+        total = int(data.get("numTotalTests", 0))
+        failed = int(data.get("numFailedTests", 0))
+        passed = int(data.get("numPassedTests", 0))
+        if total == failed + passed:
+            for spec in specs:
+                # Key with the contract's DESKTOP_VITEST: prefix so the gate's
+                # union/missing bookkeeping (which stores prefixed nodeids)
+                # matches these entries verbatim.
+                results[f"DESKTOP_VITEST:{spec}"] = (
+                    "PASSED" if failed == 0 else "FAILED")
+        else:
+            for spec in specs:
+                results[f"DESKTOP_VITEST:{spec}"] = "FAILED"  # skipped/pending not passed
+    except Exception:
+        for spec in specs:
+            results[f"DESKTOP_VITEST:{spec}"] = "FAILED"
+    finally:
+        try:
+            out_file.unlink()
+        except OSError:
+            pass
     return results
 
 
@@ -126,6 +206,13 @@ def main():
     self_ids = [i for i in items if items[i]["gate"] == "SELF"]
     struct_ids = [i for i in items if items[i]["gate"] == "STRUCT"]
     selftest_ids = [i for i in items if items[i]["gate"] == "SELFTEST"]
+
+    # STRUCT-0 (fail-closed keyed evidence): named acceptance keys MUST be
+    # present in the contract. Without this, P17 could pass with a selector
+    # unit test standing in for the required E2E — the exact regression this
+    # amendment closes.
+    key_violations = check_required_keys(items)
+    assert not key_violations, "; ".join(key_violations)
 
     # STRUCT-1: status + asserts everywhere; evidence where required.
     for iid, it in items.items():
@@ -156,7 +243,15 @@ def main():
     union = [n for iid in ev_ids if iid not in self_ids
              for n in items[iid]["nodeids"]]
     assert union, "empty evidence set"
-    results = run_pytest(union)
+    # Split the union: pytest nodeids run via pytest; DESKTOP_VITEST: specs run
+    # via the desktop vitest runner. Both report into the same results map so
+    # verdicts stay uniform.
+    pytest_nodeids = [n for n in union if not n.startswith("DESKTOP_VITEST:")]
+    vitest_specs = [VITEST_RE.match(n).group(1)
+                    for n in union if VITEST_RE.match(n)]
+    results = run_pytest(pytest_nodeids) if pytest_nodeids else {}
+    if vitest_specs:
+        results.update(run_desktop_vitest(vitest_specs))
     executed = set(results)
     missing = [n for n in set(union) if n not in executed]
     skipped = [n for n, r in results.items() if r == "SKIPPED"]

@@ -117,12 +117,13 @@ Evidence:
 - tests/agent/test_smart_router.py::TestFailover::test_empty_chain_raises
 Asserts: все маршруты мертвы / цепочка пуста → исключение.
 
-## [P17] Большой контекст фильтруется ДО выбора модели
+## [P17] Большой контекст: compaction → switch в ТОМ ЖЕ turn
 Status: CLOSED
 Evidence:
-- tests/agent/test_smart_router.py::TestContextAndBudget::test_large_context_filtered_before_routing
-- tests/agent/test_smart_router.py::TestContextAndBudget::test_small_context_passes_through
-Asserts: большой режется с флагом truncated, маленький идёт как есть без потерь.
+- LARGE_CONTEXT_COMPACTION_SWITCH_E2E: tests/agent/test_main_turn_route_fit_compaction.py::test_a1_compact_then_switch_same_turn
+- LARGE_CONTEXT_STILL_TOO_LARGE_NEXT_ROUTE: tests/agent/test_main_turn_route_fit_compaction.py::test_a2_preferred_insufficient_next_route_serves
+Asserts: production-like runtime path — активный (не кумулятивный) контекст не лезет в preferred route → вызывается СУЩЕСТВУЮЩИЙ компрессор (`agent._compress_context`, не второй compressor) → route chain пересчитывается ПОСЛЕ compaction → selected route меняется → тот же turn завершается SUCCESS без manual confirmation и без Turn failed. A2: после compaction preferred всё ещё не помещается → CONTEXT_INSUFFICIENT → skip → следующий usable route обслуживает тот же turn.
+Acceptance: unit/mock-тесты вокруг selector (в т.ч. filter_context_before_routing) НЕ закрывают P17 — требуется production-like E2E через run_conversation с реальной compressor-фасадой. Гейт должен FAIL при отсутствии этого evidence.
 
 ## [P18] Обычный таск не запрашивает ~131k токенов
 Status: CLOSED
@@ -201,6 +202,13 @@ Status: CLOSED
 Evidence:
 - GATE:STRUCT
 Asserts: гейт всегда выполняет pytest сам с -p no:cacheprovider и принимает только PASSED этого прогона.
+
+## [P29] Новая free-модель доходит до реального Desktop-пикера
+Status: CLOSED
+Evidence:
+- FREE_MODEL_DESKTOP_PICKER_RENDER: DESKTOP_VITEST:apps/desktop/src/app/shell/model-catalog-menu.discovered-free-model.test.tsx
+Asserts: реальный model.options payload (shape build_model_options_payload: providers[].models/pricing/capabilities, discovered free-модель вне curated списка) → production flow requestModelOptions → useQuery → groupModels → рендер ModelCatalogMenu показывает её ID/имя. Мокается ТОЛЬКО транспорт; список не подставляется готовым. Backend discovery evidence НЕ заменяет Desktop render evidence.
+Acceptance: закрытие бэкендом (catalog→discovery→payload) без Desktop-рендера НЕ закрывает этот пункт.
 
 ## Amendments (уточнения мёржатся в контракт, а не начинают заново)
 - A1: complex залипал на дешёвых (cost-first) → select_route: strong tier first; тесты test_complex_escalates_to_strong, test_complex_falls_back_when_no_strong.

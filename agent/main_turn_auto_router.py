@@ -249,6 +249,52 @@ def terminal_route_summary(agent: Any) -> Dict[str, Any]:
     return {"attempts": attempts, "no_usable_routes": exhausted}
 
 
+def _context_message_tokens(messages: Any) -> int:
+    """Rough ACTIVE-context estimate over a message list (chars/4 per text)."""
+    total = 0
+    if not isinstance(messages, list):
+        return 0
+    for message in messages:
+        if isinstance(message, dict):
+            total += estimate_tokens(_visible_routing_text(message.get("content")))
+    return total
+
+
+def _compact_active_context_via_existing_pipeline(
+    agent: Any, messages: List[Dict[str, Any]], need_tokens: int,
+) -> Optional[List[Dict[str, Any]]]:
+    """Shrink the ACTIVE context with the agent's EXISTING compressor facade.
+
+    Calls ``agent._compress_context`` — the same ``ContextCompressor.compress``
+    pipeline the turn loop uses (prune → summarize → assemble → persist). No
+    second compressor is created. Returns the compacted list, or ``None`` when
+    compaction is unavailable/skipped (compression disabled, cooldown active,
+    structural no-op, or the pipeline raised). Cooldown and failure semantics
+    of the facade are respected as-is: a skipped compaction simply falls back
+    to the window-filtered route plan.
+    """
+    if not messages:
+        return None
+    if not getattr(agent, "compression_enabled", True):
+        return None
+    compress_facade = getattr(agent, "_compress_context", None)
+    if not callable(compress_facade):
+        return None
+    try:
+        shrunk = compress_facade(
+            messages, None, approx_tokens=need_tokens, task_id="default",
+        )
+    except Exception:
+        return None
+    shrunk_messages = shrunk[0] if isinstance(shrunk, tuple) else shrunk
+    if (
+        not isinstance(shrunk_messages, list)
+        or shrunk_messages is messages      # facade returns the input object when it skips
+    ):
+        return None
+    return shrunk_messages
+
+
 def prepare_main_turn_auto_route(
     agent: Any, goal: Any, active_context: Any = None,
 ) -> Optional[RouteDecision]:
@@ -260,8 +306,36 @@ def prepare_main_turn_auto_route(
     candidates = getattr(agent, "_main_turn_auto_routes", ())
     if not candidates:
         return None
-    decision, ordered = plan_main_turn_routes(candidates, goal, active_context)
     agent._main_turn_route_log = RouteLog()
+    agent._main_turn_route_compacted_context = None
+
+    # Route-fit compaction (same-turn): the POLICY-preferred route is the one
+    # the router would pick for this goal ignoring the context-window filter.
+    # When that route cannot hold the ACTIVE context (not the cumulative
+    # session count), run the EXISTING compaction pipeline once and re-plan
+    # from the compacted list. If the preferred route still does not fit, the
+    # re-plan skips it (context insufficient) and the next usable route serves
+    # the same turn — no premature turn failure at routing time.
+    goal_text = _visible_routing_text(goal)
+    context_list = active_context if isinstance(active_context, list) else []
+    goal_tokens = estimate_tokens(goal_text)
+    context_tokens = _context_message_tokens(context_list)
+    preferred = select_route(
+        candidates, complexity=classify_task_complexity(goal_text),
+        need_tokens=goal_tokens,
+    ).route
+    if (
+        preferred is not None
+        and preferred.context_window < goal_tokens + context_tokens
+    ):
+        compacted = _compact_active_context_via_existing_pipeline(
+            agent, context_list, goal_tokens + context_tokens,
+        )
+        if compacted is not None:
+            active_context = compacted
+            agent._main_turn_route_compacted_context = compacted
+
+    decision, ordered = plan_main_turn_routes(candidates, goal, active_context)
     if decision.route is None:
         agent._main_turn_route_decision = decision
         return decision
