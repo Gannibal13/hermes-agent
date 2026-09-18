@@ -205,8 +205,11 @@ def select_route(
 
     def sort_key(r: Route) -> Tuple[float, int, float]:
         tier_rank = {"cheap": 0, "standard": 1, "strong": 2}.get(r.tier, 1)
-        local_bonus = -1 if (prefer_local and r.local) else 0
-        return (float(r.cost_per_1k or 0.0), tier_rank + local_bonus, tier_rank)
+        # local is the absolute last reserve: unless explicitly preferred it
+        # must lose every tie-break with any cloud route, including cost and
+        # tier ties (prefer_local flips it back to first-class).
+        local_rank = 0 if (prefer_local and r.local) else (2 if r.local else 0)
+        return (float(r.cost_per_1k or 0.0) + local_rank, tier_rank, tier_rank)
 
     if complexity == "complex":
         def complex_key(r: Route) -> Tuple[int, int, float]:

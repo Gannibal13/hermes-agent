@@ -178,7 +178,10 @@ def test_auto_decision_reports_the_route_that_execution_activated():
     )
     initialize_main_turn_auto_routes(agent)
 
-    def activate_second(selected_agent, reason=None, selection_reason=None):
+    # Under the local-strict-last policy the preferred route is the cloud
+    # (gateway) and local is the tail reserve. Simulate the runtime skipping
+    # the preferred gateway and activating the next configured route (local).
+    def activate_next(selected_agent, reason=None, selection_reason=None):
         selected = selected_agent._fallback_chain[1]
         selected_agent.provider = selected["provider"]
         selected_agent.model = selected["model"]
@@ -186,13 +189,17 @@ def test_auto_decision_reports_the_route_that_execution_activated():
         return True
 
     # When: the prepared chain is executed.
-    with patch("agent.chat_completion_helpers.try_activate_fallback", side_effect=activate_second):
+    with patch("agent.chat_completion_helpers.try_activate_fallback", side_effect=activate_next):
         decision = prepare_main_turn_auto_route(agent, "Fix typo", [])
 
     # Then: observability names the actual route, not the unavailable policy preference.
     assert decision is not None
     assert decision.route is not None
-    assert (decision.route.provider, decision.route.model) == ("gateway", "standard-workhorse")
+    activated = (agent.provider, agent.model)
+    assert (decision.route.provider, decision.route.model) == activated
+    # And: the execution chain still puts the cloud route first — activation
+    # of a later route never reorders local ahead of a usable cloud route.
+    assert agent._fallback_chain[0]["model"] == "standard-workhorse"
 
 
 def test_manual_switch_after_auto_init_disables_auto_override():
