@@ -521,7 +521,16 @@ def ensure_lmstudio_model_loaded(
 
     current_context = _lmstudio_loaded_context(target_entry)
     if current_context is not None:
-        return _result(current_context)
+        # A loaded instance whose context is below the requested target must be
+        # reloaded: otherwise an on-demand reserve inherits an unusable window
+        # (e.g. 8k JIT default) and every request 400s with exceed_context_size.
+        if explicit_context is not None and current_context < explicit_context:
+            if unload_lmstudio_instance(model, base_url, api_key):
+                pass  # fall through to the cold-load path below
+            else:
+                return _result(current_context)
+        else:
+            return _result(current_context)
 
     loaded_instances = target_entry.get("loaded_instances")
     if not isinstance(loaded_instances, list) or loaded_instances:
@@ -555,6 +564,70 @@ def ensure_lmstudio_model_loaded(
     if refreshed_models is None:
         return _result(None, load_attempted=True)
     return _result(_lmstudio_loaded_context(_lmstudio_entry_for(refreshed_models, model)), load_attempted=True)
+
+
+def lmstudio_loaded_instance_id(
+    model: str,
+    base_url: Optional[str],
+    api_key: Optional[str],
+    timeout: float = 5.0,
+) -> Optional[str]:
+    """Return the loaded instance id for ``model``, or None when not loaded.
+
+    Reads the native management API (``/api/v1/models`` → ``loaded_instances[].id``);
+    a request failure is indistinguishable from "not loaded" (None) so callers fall
+    back to a load attempt."""
+    import urllib.request
+
+    server_root = _lmstudio_server_root(base_url)
+    if not server_root:
+        return None
+    try:
+        request = urllib.request.Request(
+            server_root + "/api/v1/models", headers=_lmstudio_request_headers(api_key),
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode())
+    except Exception:
+        return None
+    entry = _lmstudio_entry_for(
+        payload.get("models") if isinstance(payload, dict) else [], model)
+    instances = (entry or {}).get("loaded_instances")
+    if isinstance(instances, list) and instances and isinstance(instances[0], dict):
+        instance_id = instances[0].get("id")
+        return str(instance_id) if instance_id else None
+    return None
+
+
+def unload_lmstudio_instance(
+    model: str,
+    base_url: Optional[str],
+    api_key: Optional[str],
+    timeout: float = 30.0,
+) -> bool:
+    """Unload ``model``'s loaded instance via the native management API.
+
+    Returns True when the instance was loaded and the unload request completed."""
+    import urllib.request
+
+    instance_id = lmstudio_loaded_instance_id(model, base_url, api_key, timeout=timeout)
+    if not instance_id:
+        return False
+    server_root = _lmstudio_server_root(base_url)
+    if not server_root:
+        return False
+    try:
+        request = urllib.request.Request(
+            server_root + "/api/v1/models/unload",
+            data=json.dumps({"instance_id": instance_id}).encode(),
+            headers={**_lmstudio_request_headers(api_key), "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            resp.read()
+        return True
+    except Exception:
+        return False
 
 
 def lmstudio_model_reasoning_options(

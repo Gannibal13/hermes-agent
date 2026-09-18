@@ -177,28 +177,108 @@ def _fallback_entry_for_route(agent: Any, route: Route) -> Dict[str, Any]:
 
 
 def _append_local_last_reserve(agent: Any, routes: Sequence[Route]) -> List[Route]:
-    """Keep one configured local endpoint as the final AUTO fallback."""
+    """Ensure up to two on-demand local reserves trail the AUTO chain.
+
+    Reserves are the first two LOCAL candidates from config (``candidates_from_parent``
+    preserves ``fallback_providers`` order) that are not already in the chain. Existing
+    chain entries are never removed or reordered: a cloud endpoint on loopback (tests,
+    tunnels) must not be misclassified as a reserve just because of its URL — only
+    explicitly-``local`` candidates qualify as reserves.
+    """
+    candidates = [
+        route for route in candidates_from_parent(agent)
+        if bool(route.local)
+    ]
+    if not candidates:
+        return list(routes)
+    existing = {_route_key(route) for route in routes}
+    reserves: List[Route] = []
+    for candidate in candidates:
+        if len(reserves) >= 2:
+            break
+        if _route_key(candidate) not in existing:
+            reserves.append(candidate)
+    return [*routes, *reserves]
+
+
+def _entry_base_url(fb_entry: Any) -> Optional[str]:
+    """Resolve a reserve's base URL: entry override, then the provider registry default."""
+    base_url = str(fb_entry.get("base_url") or "").strip() if isinstance(fb_entry, dict) else ""
+    if base_url:
+        return base_url
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.providers import resolve_provider_full
+
+        provider = str((fb_entry or {}).get("provider") or "").strip()
+        if not provider:
+            return None
+        config = load_config()
+        pdef = resolve_provider_full(provider, user_providers=config.get("providers"))
+        resolved = str(getattr(pdef, "base_url", "") or "").strip()
+        return resolved or None
+    except Exception:
+        return None
+
+
+def ensure_local_reserve_loaded(agent: Any, fb_entry: Any, base_url: Optional[str] = None) -> bool:
+    """On-demand load for an AUTO local-reserve fallback entry. Always True for non-local.
+
+    Entry knobs (all optional):
+      - ``on_demand: true`` — the route may sit unloaded/idle; verify health before use.
+      - ``on_demand_command`` — llama.cpp: command that (re)starts the server process.
+      - ``on_demand_context_length`` — LM Studio: context length requested on load.
+    Without ``on_demand`` the entry behaves exactly as before (no probing).
+    """
+    if not isinstance(fb_entry, dict) or not fb_entry.get("on_demand"):
+        return True
+    from hermes_cli.models_on_demand import ensure_llamacpp_server_loaded, health_ok
+
+    base_url = (base_url or "").strip() or _entry_base_url(fb_entry)
+    provider = str(fb_entry.get("provider") or "").strip().lower()
+    if provider == "lmstudio":
+        from hermes_cli.models_local import ensure_lmstudio_model_loaded
+        context_length = fb_entry.get("on_demand_context_length")
+        result = ensure_lmstudio_model_loaded(
+            str(fb_entry.get("model") or ""), base_url, "", context_length, return_load_result=True,
+        )
+        if bool(getattr(result, "rejected", False)):
+            return False
+        return True
+    ok, _error = ensure_llamacpp_server_loaded(fb_entry, base_url)
+    return ok or health_ok(base_url)
+
+
+def unload_local_reserve_if_on_demand(
+    provider: str, model: str, base_url: Optional[str], entries: Optional[Dict[Any, Any]] = None,
+) -> bool:
+    """Unload a LOCAL reserve when it is an on-demand entry (switching away from it).
+
+    Returns True when an unload was attempted/completed. llama.cpp reserves are
+    stopped by terminating the server process; LM Studio reserves are unloaded
+    through the management API. Never raises."""
     from agent.model_metadata import is_local_endpoint
 
-    def is_local(route: Route) -> bool:
-        return bool(route.local or (route.base_url and is_local_endpoint(route.base_url)))
-
-    ordered = list(routes)
-    if any(is_local(route) for route in ordered):
-        return ordered
-    current = Route(
-        provider=str(getattr(agent, "provider", "") or ""),
-        model=str(getattr(agent, "model", "") or ""),
-        base_url=str(getattr(agent, "base_url", "") or "") or None,
-    )
-    if is_local(current):
-        return ordered
-    existing = {_route_key(route) for route in ordered}
-    for route in candidates_from_parent(agent):
-        if is_local(route) and _route_key(route) not in existing:
-            ordered.append(route)
-            break
-    return ordered
+    provider = (provider or "").strip().lower()
+    model = (model or "").strip()
+    base_url = (base_url or "").strip() or None
+    if not (provider and model):
+        return False
+    if not (base_url and is_local_endpoint(base_url)):
+        return False
+    entry = (entries or {}).get((provider, model)) or {}
+    if not entry.get("on_demand"):
+        return False
+    try:
+        if provider == "lmstudio":
+            from hermes_cli.models_local import unload_lmstudio_instance
+            return unload_lmstudio_instance(model, base_url, "")
+        from hermes_cli.models_on_demand import stop_llamacpp_server, health_ok
+        if not health_ok(base_url):
+            return False
+        return stop_llamacpp_server(base_url)
+    except Exception:
+        return False
 
 
 def record_main_turn_route_attempt(

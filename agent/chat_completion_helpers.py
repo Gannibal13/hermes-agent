@@ -1917,6 +1917,14 @@ def try_activate_fallback(
 
             agent._use_prompt_caching, agent._use_native_cache_layout = agent._anthropic_prompt_cache_policy(
                 provider=fb_provider, base_url=fb_base_url, api_mode=fb_api_mode, model=fb_model)
+            from agent.main_turn_auto_router import unload_local_reserve_if_on_demand
+            # free VRAM before the next reserve loads (old runtime captured above the swap)
+            unload_local_reserve_if_on_demand(
+                old_provider, old_model, old_base_url, getattr(agent, "_main_turn_auto_entries", {}))
+            from agent.main_turn_auto_router import ensure_local_reserve_loaded
+            if not ensure_local_reserve_loaded(agent, fb, fb_base_url):
+                raise RuntimeError(
+                    f"local reserve {fb_model} via {fb_provider} is not loaded and on-demand load failed")
             agent._ensure_lmstudio_runtime_loaded()  # LM Studio: preload before probing context length
             _update_fallback_context_compressor(agent)
             _reresolve_fallback_reasoning_config(agent)
