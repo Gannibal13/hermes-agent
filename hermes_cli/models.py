@@ -597,10 +597,27 @@ def fetch_openrouter_models(
             desc = "free" if _openrouter_model_is_free(live_item.get("pricing")) else ""
         curated.append((preferred_id, desc))
 
+    # Дописываем по-настоящему новые live-модели, которых нет в curated-манифесте: только бесплатные
+    # (нулевые prompt И completion) и с поддержкой tools. Порядок — как в живом каталоге, без дублей.
+    known_ids = {model_id for model_id, _desc in curated}
+    for item in live_items:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("id") or "").strip()
+        if not model_id or model_id in known_ids:
+            continue
+        if not _openrouter_model_supports_tools(item):
+            continue
+        if not _openrouter_model_is_free(item.get("pricing")):
+            continue
+        curated.append((model_id, "free"))
+        known_ids.add(model_id)
+
     if not curated:
         return list(cached or fallback)
     if not curated[0][1]:
         curated[0] = (curated[0][0], "recommended")
+
     profile_slot_set(_me, "_openrouter_catalog_cache", curated)
     _write_openrouter_catalog_disk(curated)
     return list(curated)

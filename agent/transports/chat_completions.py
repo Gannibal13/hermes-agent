@@ -277,6 +277,17 @@ def _swap_developer_role(sanitized: list, model_lower: str) -> list:
     return sanitized
 
 
+# Safety ceiling: an ordinary chat/coding request must never reserve a
+# context-window-sized output budget. OpenRouter (and any gateway that
+# budgets the FULL window when max_tokens is omitted) answers 402
+# "You requested up to N tokens" when the account cannot afford the window.
+_MAX_TOKENS_SAFETY_CEILING = 32768
+# Fallback budget when no explicit cap is configured. Task-adaptive sizing
+# lives in agent.smart_router.adaptive_max_tokens; the transport cannot
+# classify the goal, so it applies the "standard" default via that helper.
+_ORDINARY_DEFAULT_OUTPUT_BUDGET = 4000
+
+
 def _apply_max_tokens(api_kwargs: dict, model: str, reasoning_config: Any, params: dict, profile_max: Any = None) -> None:
     """Preserve internal task/recovery budgets and provider protocol exceptions."""
     max_tokens_fn = params.get("max_tokens_param_fn")
@@ -286,6 +297,21 @@ def _apply_max_tokens(api_kwargs: dict, model: str, reasoning_config: Any, param
             return
     if profile_max and max_tokens_fn:
         api_kwargs.update(max_tokens_fn(_raise_gemini_thinking_max_tokens(model, reasoning_config, profile_max)))
+        return
+    # No configured budget on a route whose gateway budgets the full window
+    # when the field is omitted (OpenRouter): send a bounded ordinary-task
+    # budget instead of letting the gateway reserve ~131k output tokens.
+    # Recovery paths keep their own floors via _ephemeral_max_output_tokens
+    # (handled above), so this only fills the unspecified case.
+    base_url = str(params.get("base_url") or "").lower()
+    is_openrouter = (
+        "openrouter.ai" in base_url
+        or str(params.get("model") or "").lower().startswith("openrouter/")
+        or bool(params.get("provider_name") == "openrouter")
+    )
+    if is_openrouter and max_tokens_fn:
+        budget = min(_ORDINARY_DEFAULT_OUTPUT_BUDGET, _MAX_TOKENS_SAFETY_CEILING)
+        api_kwargs.update(max_tokens_fn(_raise_gemini_thinking_max_tokens(model, reasoning_config, budget)))
 
 
 
