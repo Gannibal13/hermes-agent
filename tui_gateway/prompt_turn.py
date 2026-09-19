@@ -156,6 +156,7 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True)
         record_turn_start(marker_home, marker_key, marker_text, attempts=marker_attempt,
                           auto_continue=auto_continue)
         clear_turn_cancelled(marker_home, marker_key)
+        clear_tool_receipts(marker_home, marker_key)
         with session["history_lock"]:
             marker_cancelled = bool(session.get("_turn_cancel_requested"))
         if marker_cancelled:

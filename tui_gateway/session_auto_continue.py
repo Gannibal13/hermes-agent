@@ -46,13 +46,21 @@ def _retire_turn_marker(session: dict, *keys: str) -> None:
             clear_turn_marker(home, key)
 
 
-def _auto_continue_note(prompt: str) -> str:
+def _auto_continue_note(prompt: str, completed: object = ()) -> str:
     # Same opening as the gateway's recovery notes (transcript tooling recognizes both). The prompt is embedded: a hard
     # crash persists nothing else of the turn.
-    return (f"{_AUTO_CONTINUE_NOTE_PREFIX} — the app or its backend process stopped before the turn could finish. "
+    note = (f"{_AUTO_CONTINUE_NOTE_PREFIX} — the app or its backend process stopped before the turn could finish. "
             "Some of the work may already be complete; check the current state before redoing anything, then "
             f"finish the task. The interrupted request was:]\n\n{prompt}")
-
+    try:
+        items = [str(x).strip() for x in (completed or ()) if str(x).strip()]
+    except Exception:
+        items = []
+    if items:
+        lines = "\n".join(f"- {x[:500]}" for x in items[:20])
+        note += ("\n\n[Already completed before the interruption (do NOT redo these effects, "
+                 "reuse their results and continue from here):]\n" + lines)
+    return note
 
 def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> dict | None:
     """Kick off a continuation turn for a crash-interrupted session (session.resume cold paths). Returns a descriptor
@@ -78,7 +86,8 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     if session.get("_auto_continue_scheduled"):
         return None
     session["_auto_continue_scheduled"] = True
-    attempt, text = marker["attempts"] + 1, _auto_continue_note(marker["prompt"])
+    _completed = list(completed_fingerprints(home, session_key).values())
+    attempt, text = marker["attempts"] + 1, _auto_continue_note(marker["prompt"], _completed)
 
     def kickoff() -> None:
         rid = f"__auto_continue__{int(time.time() * 1000)}"

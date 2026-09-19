@@ -36,6 +36,7 @@ from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX  # noqa: 
 from tui_gateway import git_probe
 from tui_gateway._env import env_float, env_int
 from tui_gateway.turn_marker import (clear_turn_cancelled, clear_turn_marker, is_turn_cancelled, read_turn_marker, record_turn_cancelled, record_turn_start)  # noqa: F401
+from tui_gateway.tool_receipts import clear_tool_receipts, completed_fingerprints, record_tool_receipt  # noqa: F401
 from tui_gateway.contracts import registry as _contracts
 # User-facing copy shared with the split method modules (they close over this namespace).
 from tui_gateway.user_messages import (  # noqa: F401

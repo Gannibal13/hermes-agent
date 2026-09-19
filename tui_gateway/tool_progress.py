@@ -269,6 +269,21 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
     summary = _tool_summary(name, result, duration_s)
     if summary:
         payload["summary"] = summary
+    with contextlib.suppress(Exception):
+        _receipt_ok, _receipt_result = True, result
+        try:
+            _receipt_result = json.loads(result)
+        except Exception:
+            pass
+        if isinstance(_receipt_result, dict) and _receipt_result.get("error"):
+            _receipt_ok = False
+        _receipt_session = _sessions.get(sid) if "_sessions" in globals() else None
+        if _receipt_session is not None and _receipt_session.get("session_key"):
+            from hermes_constants import get_hermes_home as _receipt_home_fn
+            _receipt_home = _receipt_session.get("profile_home") or _receipt_home_fn()
+            record_tool_receipt(_receipt_home, str(_receipt_session.get("session_key")),
+                                str(tool_call_id), str(name), args if isinstance(args, dict) else {},
+                                summary or f"{name} completed", ok=_receipt_ok)
     if _session_verbose(sid) and (result_text := _tool_result_text(result)):
         payload["result_text"] = result_text
     todo_state = _normalize_todo_state(payload.get("result")) if name in _TODO_TOOL_NAMES else None
