@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 from tui_gateway.method_ctx import rebind
 from tui_gateway import session_notifications, session_auto_continue
-from tui_gateway.turn_marker import record_turn_start, read_turn_marker
+from tui_gateway.turn_marker import (clear_turn_marker, is_turn_cancelled, record_turn_start,
+                                       read_turn_marker)
 
 
 def test_refused_input_commits_failed_mailbox_receipt(tmp_path):
@@ -55,6 +56,8 @@ def test_imported_crash_marker_never_autocontinues(tmp_path):
     schedule = rebind(session_auto_continue._maybe_schedule_auto_continue, {
         "_session_home": lambda session: tmp_path,
         "read_turn_marker": read_turn_marker,
+        "is_turn_cancelled": is_turn_cancelled,
+        "clear_turn_marker": clear_turn_marker,
     })
     assert schedule("live", {}, "chat") is None
 
