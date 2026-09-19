@@ -45,6 +45,7 @@ def _worker_source(home: str, key: str, prompt: str) -> str:
         "import sys, time; sys.path.insert(0, r'%s'); "
         "from tui_gateway.turn_marker import record_turn_start; "
         "import os; "
+        "print('WORKER_PID', os.getpid(), flush=True); "
         "record_turn_start(r'%s', '%s', '%s', owner_pid=os.getpid()); "
         "time.sleep(300)"
         % (str(WT), home, key, prompt)
@@ -55,24 +56,33 @@ def phase_a_worker_kill(home: Path) -> None:
     key, prompt = "turn-aaa", "rebuild the weekly report"
     proc = subprocess.Popen(
         [sys.executable, "-c", _worker_source(str(home), key, prompt)],
-        cwd=str(WT),
+        cwd=str(WT), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
+    # NOTE: proc.pid is the *launcher* (python -c wrapper), not the worker.
+    # The worker announces its own pid on stdout; that is the owner_pid the
+    # marker must carry.
+    worker_pid = None
     deadline = time.time() + 30
     marker_path = home / "desktop" / "interrupted_turns.json"
     while time.time() < deadline:
+        if proc.poll() is not None:
+            raise AssertionError("worker exited before writing its marker")
         if marker_path.exists():
             try:
                 data = json.loads(marker_path.read_text(encoding="utf-8"))
             except Exception:
                 data = {}
             entry = data.get(key)
-            if isinstance(entry, dict) and entry.get("owner_pid") == proc.pid:
+            if isinstance(entry, dict) and entry.get("owner_pid"):
+                worker_pid = entry["owner_pid"]
                 break
         time.sleep(0.2)
     else:
         proc.kill()
         raise AssertionError("worker never wrote its marker")
-    check("A1 worker wrote real marker with own pid", True, f"pid={proc.pid}")
+    check("A1 worker wrote real marker with own pid",
+          worker_pid is not None and worker_pid != proc.pid,
+          f"launcher={proc.pid} owner_pid={worker_pid}")
     proc.kill()  # real OS-level kill of the turn owner
     proc.wait(timeout=30)
     check("A2 worker process is dead", proc.poll() is not None, f"rc={proc.returncode}")
