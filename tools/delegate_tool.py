@@ -346,6 +346,16 @@ def _build_child_agent(
             child._smart_route_budget = dict(smart_budget)
     except Exception:
         pass
+    # Store the full failover chain on the child so _run_single_child()
+    # can walk A→B→C→D without parent involvement.
+    # `candidates` comes from the try-block above (may not exist if Smart Router was disabled).
+    _candidate_routes = candidates if 'candidates' in dir() else []
+    _primary_route = getattr(smart_decision, 'route', None) if smart_decision else None
+    if _primary_route is not None and _candidate_routes:
+        from agent.smart_router import build_failover_chain
+        child._smart_route_failover_chain = build_failover_chain(_primary_route, _candidate_routes)
+    elif _primary_route is not None:
+        child._smart_route_failover_chain = [_primary_route]
     # spawn_requested now — the child may queue for seconds when the pool is
     # saturated — then the subagent_start lifecycle hook.
     _safe_progress(child_progress_cb, "subagent.spawn_requested", preview=goal)
@@ -375,6 +385,9 @@ def _run_single_child(
       truncated   == (exit_reason == "max_iterations").
 
     * ``"completed"``       — normal finish. See #97655.
+    * Failover: if the child's route chain has multiple entries and the
+      first attempt fails with a retryable error, ``walk_failover_chain``
+      automatically advances to the next route without parent involvement.
     """
     child_progress_cb = getattr(child, "tool_progress_callback", None)
     child_pool, leased_cred_id = _lease_child_credential(child)
@@ -391,38 +404,141 @@ def _run_single_child(
     # Set when a timed-out Future still owns the child: closing it from this
     # thread before the worker settles races the conversation's finally path.
     _child_close_deferred = False
-    try:
-        heartbeat.start()
-        _safe_progress(child_progress_cb, "subagent.start", preview=goal)
-        run.seed_workspace()
-        result, failure_entry, _child_close_deferred = run.await_child()
-        if failure_entry is not None:
-            return failure_entry
 
-        schema = _validate_child_output_schema(child, result, task_index, run.child_task_id, run.relay_text)
-        _merge_late_steer(result, _subagent_id, child)
-        # Flush any remaining batched progress to gateway
-        if child_progress_cb and hasattr(child_progress_cb, "_flush"):
-            with _quiet("Progress callback flush failed: %s"):
-                child_progress_cb._flush()
+    # Failover chain: walk A→B→C→D automatically. The chain is stored on
+    # the child by _build_child() when Smart Router auto-routed.
+    failover_chain = getattr(child, "_smart_route_failover_chain", None)
+    if failover_chain and len(failover_chain) > 1:
+        from agent.smart_router import RouteLog as _RouteLog
+        from agent.smart_router import should_try_next_route
+        chain = failover_chain
+        route_log = _RouteLog()
 
-        duration = run.elapsed()
-        entry = _build_result_entry(child, result, task_index, duration, schema)
-        run.append_sibling_write_reminder(entry)
-        run.account_background_processes(entry)
-        run.emit_complete(result, entry, duration)
-        return run.attach_worktree(entry)
-    except Exception as exc:
-        # Close steer acceptance before any completion callback (see _merge_late_steer).
-        _late_pending_steer = run.close_steering()
-        logging.exception(f"[subagent-{task_index}] failed")
-        # Entry status "error" (contract), progress event status "failed" (UI vocabulary).
-        return run.finish_failed(
-            _fabricated_entry(task_index, "error", str(exc), child, run.elapsed()), _late_pending_steer,
-            preview=str(exc), summary=str(exc), status="failed",
-        )
-    finally:
-        run.cleanup(heartbeat=heartbeat, child_pool=child_pool, leased_cred_id=leased_cred_id, close_deferred=_child_close_deferred)
+        def _activate_route(route):
+            """Swap child runtime to this route's provider/model."""
+            route_provider = getattr(route, "provider", None)
+            route_model = getattr(route, "model", None)
+            if route_provider:
+                child.provider = route_provider
+            if route_model:
+                child.model = route_model
+            base_url = getattr(route, "base_url", None)
+            if base_url:
+                child.base_url = base_url
+
+        def _attempt_route(route):
+            """Execute one route attempt; return (ok, payload, info)."""
+            _activate_route(route)
+            route_log.record(route, outcome="attempt")
+            try:
+                result, failure_entry, _cd = run.await_child()
+            except Exception as exc:
+                err_text = str(exc)
+                route_log.record(route, outcome="failed", error=exc, latency_s=None)
+                if should_try_next_route(None, err_text):
+                    return (False, err_text, {"error": err_text})
+                raise
+            if failure_entry is not None:
+                err_text = str(failure_entry.get("error", ""))
+                status = failure_entry.get("status")
+                route_log.record(route, outcome="failed", error=failure_entry, latency_s=None)
+                if should_try_next_route(status, err_text):
+                    return (False, err_text, {"status": status, "error": err_text})
+                # Non-retryable: propagate immediately
+                return (False, failure_entry, {"status": status, "error": err_text, "non_retryable": True})
+            # Success
+            route_log.record(route, outcome="success")
+            return (True, result, {"status": "completed"})
+
+        _late_pending_steer = None
+        try:
+            last_error = None
+            for route_idx, route in enumerate(chain):
+                ok, payload, info = _attempt_route(route)
+                if ok:
+                    result = payload
+                    break
+                last_error = payload
+                if info.get("non_retryable"):
+                    # Non-retryable failure: stop the chain immediately
+                    _child_close_deferred = False
+                    schema = _validate_child_output_schema(child, None, task_index, run.child_task_id, run.relay_text)
+                    _merge_late_steer(None, _subagent_id, child)
+                    duration = run.elapsed()
+                    entry = _build_result_entry(child, None, task_index, duration, schema)
+                    entry["error"] = str(payload)
+                    entry["status"] = "failed"
+                    run.append_sibling_write_reminder(entry)
+                    run.account_background_processes(entry)
+                    run.emit_complete(None, entry, duration)
+                    if route_log is not None:
+                        entry["_route_log"] = route_log.tried_labels()
+                    return run.attach_worktree(entry)
+                # else: retryable — continue to next route
+            else:
+                # Chain exhausted without success
+                raise RuntimeError(f"failover chain exhausted after {len(chain)} routes: {last_error}")
+
+            # Success — build the entry from the winning result
+            _child_close_deferred = False
+            schema = _validate_child_output_schema(child, result, task_index, run.child_task_id, run.relay_text)
+            _merge_late_steer(result, _subagent_id, child)
+            if child_progress_cb and hasattr(child_progress_cb, "_flush"):
+                with _quiet("Progress callback flush failed: %s"):
+                    child_progress_cb._flush()
+            duration = run.elapsed()
+            entry = _build_result_entry(child, result, task_index, duration, schema)
+            run.append_sibling_write_reminder(entry)
+            run.account_background_processes(entry)
+            run.emit_complete(result, entry, duration)
+            # Attach route log to entry for observability
+            if route_log is not None:
+                entry["_route_log"] = route_log.tried_labels()
+            return run.attach_worktree(entry)
+        except Exception as exc:
+            _late_pending_steer = run.close_steering()
+            logging.exception(f"[subagent-{task_index}] failover exhausted")
+            return run.finish_failed(
+                _fabricated_entry(task_index, "error", str(exc), child, run.elapsed()), _late_pending_steer,
+                preview=str(exc), summary=str(exc), status="failed",
+            )
+        finally:
+            run.cleanup(heartbeat=heartbeat, child_pool=child_pool, leased_cred_id=leased_cred_id,
+                       close_deferred=_child_close_deferred)
+    else:
+        # Single route (or no chain): original behavior, no failover loop
+        try:
+            heartbeat.start()
+            _safe_progress(child_progress_cb, "subagent.start", preview=goal)
+            run.seed_workspace()
+            result, failure_entry, _child_close_deferred = run.await_child()
+            if failure_entry is not None:
+                return failure_entry
+
+            schema = _validate_child_output_schema(child, result, task_index, run.child_task_id, run.relay_text)
+            _merge_late_steer(result, _subagent_id, child)
+            # Flush any remaining batched progress to gateway
+            if child_progress_cb and hasattr(child_progress_cb, "_flush"):
+                with _quiet("Progress callback flush failed: %s"):
+                    child_progress_cb._flush()
+
+            duration = run.elapsed()
+            entry = _build_result_entry(child, result, task_index, duration, schema)
+            run.append_sibling_write_reminder(entry)
+            run.account_background_processes(entry)
+            run.emit_complete(result, entry, duration)
+            return run.attach_worktree(entry)
+        except Exception as exc:
+            # Close steer acceptance before any completion callback (see _merge_late_steer).
+            _late_pending_steer = run.close_steering()
+            logging.exception(f"[subagent-{task_index}] failed")
+            # Entry status "error" (contract), progress event status "failed" (UI vocabulary).
+            return run.finish_failed(
+                _fabricated_entry(task_index, "error", str(exc), child, run.elapsed()), _late_pending_steer,
+                preview=str(exc), summary=str(exc), status="failed",
+            )
+        finally:
+            run.cleanup(heartbeat=heartbeat, child_pool=child_pool, leased_cred_id=leased_cred_id, close_deferred=_child_close_deferred)
 
 
 def _build_children(
