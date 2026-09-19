@@ -240,6 +240,11 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
             if snapshot is not None:
                 session.setdefault("edit_snapshots", {})[tool_call_id] = snapshot
         session.setdefault("tool_started_at", {})[tool_call_id] = time.time()
+        with contextlib.suppress(Exception):
+            if session.get("session_key"):
+                from hermes_constants import get_hermes_home as _hb_home_fn
+                _hb_home = session.get("profile_home") or _hb_home_fn()
+                touch_turn_heartbeat(_hb_home, str(session.get("session_key")))
     if (_tool_progress_enabled(sid) or _tool_lifecycle_required_for_ui(name)
             or _connector_tool_lifecycle(name, args)):
         payload: dict[str, object] = {"tool_id": tool_call_id, "name": name, "context": _tool_ctx(name, args)}

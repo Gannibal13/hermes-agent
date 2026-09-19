@@ -100,15 +100,47 @@ def _prune_cancelled(entries: dict[str, dict], now: float) -> dict[str, dict]:
 
 
 def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attempts: int = 0,
-                      auto_continue: bool = True) -> None:
+                      auto_continue: bool = True, owner_pid: int | None = None) -> None:
     """Persist the marker for a turn that is about to run. ``attempts`` = how many auto-continues led to
-    this run (0 for a user-initiated turn); the crash-loop breaker reads it back on the next resume."""
+    this run (0 for a user-initiated turn); the crash-loop breaker reads it back on the next resume.
+    ``owner_pid`` = the process executing the turn (backend or compute-host child); the external
+    supervisor uses it plus ``last_heartbeat`` to tell a dead owner from a long-running one."""
     if not session_key or not prompt:
         return
     now = time.time()
+    try:
+        pid = int(owner_pid) if owner_pid is not None else None
+    except (TypeError, ValueError):
+        pid = None
     entry = {"attempts": max(0, int(attempts)), "prompt": prompt[:_MAX_PROMPT_CHARS], "started_at": now,
-             "auto_continue": bool(auto_continue)}
+             "auto_continue": bool(auto_continue), "owner_pid": pid, "last_heartbeat": now}
     _update(home, session_key, lambda entries: {**_prune(entries, now), session_key: entry}, "record")
+
+
+def touch_turn_heartbeat(home, session_key: str, *, min_interval_s: float = 45.0) -> bool:
+    """Refresh the turn liveness heartbeat (throttled). Returns True when stored."""
+    if not session_key:
+        return False
+    try:
+        now = time.time()
+        with _lock:
+            path = _marker_path(home)
+            entries = _load(path)
+            entry = entries.get(session_key)
+            if not isinstance(entry, dict):
+                return False
+            try:
+                last = float(entry.get("last_heartbeat") or entry.get("started_at") or 0)
+            except (TypeError, ValueError):
+                last = 0.0
+            if now - last < max(0.0, float(min_interval_s)):
+                return False
+            entry["last_heartbeat"] = now
+            _store(path, entries)
+            return True
+    except Exception:
+        logger.debug("failed to touch turn heartbeat for %s", session_key, exc_info=True)
+        return False
 
 
 def clear_turn_marker(home: Path | str, session_key: str) -> None:
@@ -127,8 +159,18 @@ def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | Non
         prompt = str(entry.get("prompt") or "") if isinstance(entry, dict) else ""
         if not prompt.strip():
             return None
+        try:
+            _owner = entry.get("owner_pid")
+            _owner = int(_owner) if _owner is not None else None
+        except (TypeError, ValueError):
+            _owner = None
+        try:
+            _heartbeat = float(entry.get("last_heartbeat") or _started_at(entry))
+        except (TypeError, ValueError):
+            _heartbeat = _started_at(entry)
         return {"attempts": max(0, int(entry.get("attempts") or 0)), "prompt": prompt, "started_at": _started_at(entry),
-                "auto_continue": bool(entry.get("auto_continue", True))}
+                "auto_continue": bool(entry.get("auto_continue", True)),
+                "owner_pid": _owner, "last_heartbeat": _heartbeat}
     except Exception:
         return None
 def record_turn_cancelled(home, session_key: str) -> None:

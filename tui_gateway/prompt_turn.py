@@ -150,11 +150,15 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True)
     marker_key = str(session.get("session_key") or "")
     marker_attempt = int(session.pop("_auto_continue_attempt", 0) or 0)
     marker_text = session.pop("_auto_continue_prompt", None) or text
+    _marker_owner = None
     if isinstance(marker_text, str) and marker_text.strip():
         with session["history_lock"]:
             session["_active_turn_marker_key"] = marker_key
+        with contextlib.suppress(Exception):
+            import os as _marker_os
+            _marker_owner = _marker_os.getpid()
         record_turn_start(marker_home, marker_key, marker_text, attempts=marker_attempt,
-                          auto_continue=auto_continue)
+                          auto_continue=auto_continue, owner_pid=_marker_owner)
         clear_turn_cancelled(marker_home, marker_key)
         clear_tool_receipts(marker_home, marker_key)
         with session["history_lock"]:
