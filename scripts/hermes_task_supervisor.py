@@ -17,7 +17,8 @@ durable sidecars and reports a verdict per session key:
 Hard rules (also pinned by tests):
 
 - NEVER execute a user task: no imports beyond the standard library, no
-  subprocess launches of turns, no network calls into the agent loop.
+  subprocess launches of turns (only the standard backend launcher),
+  no network calls into the agent loop.
 - Cancel is absolute: a cancelled turn always ends in ``cancelled``.
 - No restart loops: ``attempts`` and the freshness window bound every
   recovery; over-attempt markers go to dead-letter, never back to ready.
@@ -25,6 +26,7 @@ Hard rules (also pinned by tests):
 Usage:
     python scripts/hermes_task_supervisor.py scan --home <HERMES_HOME>
     python scripts/hermes_task_supervisor.py daemon --home <HERMES_HOME> --interval 30
+    python scripts/hermes_task_supervisor.py supervise --home <HERMES_HOME>
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -41,11 +44,16 @@ MARKER_REL = ("desktop", "interrupted_turns.json")
 CANCELLED_REL = ("desktop", "cancelled_turns.json")
 STATE_REL = ("desktop", "task_supervisor_state.json")
 DEAD_LETTER_REL = ("desktop", "task_dead_letters.json")
+BACKEND_PID_REL = ("desktop", "task_supervisor_backend.pid")
 
 DEFAULT_FRESHNESS_SECS = 15 * 60.0
 DEFAULT_MAX_ATTEMPTS = 2
 DEFAULT_STUCK_AFTER_SECS = 15 * 60.0
+DEFAULT_RESPAWN_INTERVAL_SECS = 0.5
+DEFAULT_MAX_RESPAWNS = 2
+DEFAULT_BACKEND_COMMAND = [sys.executable, "-m", "tui_gateway.entry"]
 STATE_TTL_SECS = 24 * 3600
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _read_json_dict(path: Path) -> dict:
@@ -162,6 +170,37 @@ def _append_dead_letter(home: Path, session_key: str, reason: str, now: float, a
     letters.append({"session_key": session_key, "reason": reason, "at": now,
                     "attempts": attempts})
     _atomic_write_json(path, letters[-100:])
+
+
+def _backend_env(home):
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(Path(home))
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    return env
+
+
+def _write_backend_pid(home, pid):
+    _atomic_write_json(Path(home).joinpath(*BACKEND_PID_REL),
+                       {"pid": int(pid), "started_at": time.time()})
+
+
+def _clear_backend_pid(home):
+    try:
+        Path(home).joinpath(*BACKEND_PID_REL).unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
+def _spawn_backend(home):
+    cmd = list(DEFAULT_BACKEND_COMMAND)
+    stdin = sys.stdin if sys.stdin is not None else None
+    stdout = sys.stdout if sys.stdout is not None else None
+    stderr = sys.stderr if sys.stderr is not None else None
+    return subprocess.Popen(cmd, cwd=str(_REPO_ROOT), env=_backend_env(home),
+                            stdin=stdin, stdout=stdout, stderr=stderr)
 
 
 def scan_once(home, *, now=None, pid_alive=None, backend_alive=None,
@@ -309,8 +348,66 @@ def _cmd_daemon(args) -> int:
         time.sleep(interval)
 
 
+def _stop_backend(proc):
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _cmd_supervise(args) -> int:
+    home = Path(args.home).resolve()
+    interval = max(0.1, float(args.interval))
+    max_respawns = max(0, int(args.max_respawns))
+    respawns = 0
+    proc = _spawn_backend(home)
+    _write_backend_pid(home, proc.pid)
+    print(f"task supervisor supervising backend pid={proc.pid} home={home}",
+          file=sys.stderr, flush=True)
+    try:
+        while True:
+            rc = proc.poll()
+            if rc is None:
+                time.sleep(interval)
+                continue
+            _clear_backend_pid(home)
+            print(f"backend exited rc={rc} respawns={respawns}/{max_respawns}",
+                  file=sys.stderr, flush=True)
+            if respawns >= max_respawns:
+                try:
+                    results = scan_once(home, backend_alive=lambda: False)
+                except Exception:
+                    results = []
+                for r in results:
+                    if r.get("verdict") == "recovery_ready":
+                        try:
+                            _append_dead_letter(home, r["session_key"], "backend respawn limit",
+                                                time.time(), int(r.get("attempts") or 0))
+                        except Exception:
+                            pass
+                return 1
+            respawns += 1
+            time.sleep(interval)
+            proc = _spawn_backend(home)
+            _write_backend_pid(home, proc.pid)
+            print(f"backend respawned pid={proc.pid} attempt={respawns}/{max_respawns}",
+                  file=sys.stderr, flush=True)
+    finally:
+        _stop_backend(proc)
+        _clear_backend_pid(home)
+    return 0
+
+
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Hermes external task-recovery supervisor (detect only)")
+    parser = argparse.ArgumentParser(description="Hermes external task-recovery supervisor (detect + bounded backend respawn)")
     sub = parser.add_subparsers(dest="command", required=True)
     scan = sub.add_parser("scan", help="inspect durable markers once")
     scan.add_argument("--home", required=True, help="HERMES_HOME to inspect")
@@ -323,6 +420,11 @@ def main(argv=None) -> int:
     daemon.add_argument("--home", required=True, help="HERMES_HOME to watch")
     daemon.add_argument("--interval", type=float, default=30.0)
     daemon.set_defaults(func=_cmd_daemon)
+    supervise = sub.add_parser("supervise", help="launch the standard backend and respawn it bounded times")
+    supervise.add_argument("--home", required=True, help="HERMES_HOME for the backend")
+    supervise.add_argument("--interval", type=float, default=DEFAULT_RESPAWN_INTERVAL_SECS)
+    supervise.add_argument("--max-respawns", type=int, default=DEFAULT_MAX_RESPAWNS)
+    supervise.set_defaults(func=_cmd_supervise)
     args = parser.parse_args(argv)
     return args.func(args)
 

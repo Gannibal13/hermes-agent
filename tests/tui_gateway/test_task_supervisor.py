@@ -55,7 +55,7 @@ def test_standalone_no_hermes_imports():
         if ln.split("#", 1)[0].strip().startswith(("import ", "from "))
     ]
     allowed_roots = {
-        "__future__", "argparse", "ctypes", "json", "os", "sys", "tempfile", "time",
+        "__future__", "argparse", "ctypes", "json", "os", "subprocess", "sys", "tempfile", "time",
         "pathlib", "pathlib.Path",
     }
     for stmt in imports:
@@ -149,3 +149,73 @@ def test_default_pid_alive_real_process(supervisor):
             break
         time.sleep(0.2)
     assert supervisor._default_pid_alive(proc.pid) is False
+
+
+def test_backend_command_uses_existing_launcher(supervisor):
+    import sys
+
+    assert supervisor.DEFAULT_BACKEND_COMMAND == [sys.executable, "-m", "tui_gateway.entry"]
+    assert supervisor.DEFAULT_MAX_RESPAWNS >= 1
+    assert supervisor.DEFAULT_RESPAWN_INTERVAL_SECS > 0
+
+
+def test_backend_env_sets_home(supervisor, tmp_path):
+    env = supervisor._backend_env(tmp_path)
+    assert env["HERMES_HOME"] == str(tmp_path)
+
+
+def test_write_and_clear_backend_pid(supervisor, tmp_path):
+    supervisor._write_backend_pid(tmp_path, 424242)
+    pid_file = tmp_path / "desktop" / "task_supervisor_backend.pid"
+    assert pid_file.exists()
+    supervisor._clear_backend_pid(tmp_path)
+    assert not pid_file.exists()
+
+
+class _DeadProc:
+    def __init__(self, pid):
+        self.pid = pid
+        self.terminated = False
+
+    def poll(self):
+        return 1
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        return 1
+
+    def kill(self):
+        self.terminated = True
+
+
+def test_supervise_exits_bounded_when_backend_dies(supervisor, tmp_path, monkeypatch):
+    calls = []
+
+    def _fake_spawn(home):
+        calls.append(str(home))
+        return _DeadProc(111)
+
+    monkeypatch.setattr(supervisor, "_spawn_backend", _fake_spawn)
+    rc = supervisor.main(["supervise", "--home", str(tmp_path),
+                          "--max-respawns", "0", "--interval", "0.1"])
+    assert rc == 1
+    assert len(calls) == 1
+    assert not (tmp_path / "desktop" / "task_supervisor_backend.pid").exists()
+
+
+def test_supervise_respawns_once_then_stops_at_limit(supervisor, tmp_path, monkeypatch):
+    procs = [_DeadProc(111), _DeadProc(222)]
+    calls = []
+
+    def _fake_spawn(home):
+        calls.append(str(home))
+        return procs[len(calls) - 1]
+
+    monkeypatch.setattr(supervisor, "_spawn_backend", _fake_spawn)
+    rc = supervisor.main(["supervise", "--home", str(tmp_path),
+                          "--max-respawns", "1", "--interval", "0.1"])
+    assert rc == 1
+    assert len(calls) == 2
+    assert not (tmp_path / "desktop" / "task_supervisor_backend.pid").exists()
