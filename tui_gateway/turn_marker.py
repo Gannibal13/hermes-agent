@@ -30,6 +30,17 @@ def _marker_path(home: Path | str) -> Path:
     return Path(home) / "desktop" / "interrupted_turns.json"
 
 
+def _cancelled_path(home) -> Path:
+    return Path(home) / "desktop" / "cancelled_turns.json"
+
+
+def _cancelled_at(entry: dict) -> float:
+    try:
+        return float(entry.get("cancelled_at") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _started_at(entry: dict) -> float:
     return float(entry.get("started_at") or 0)
 
@@ -60,16 +71,32 @@ def _store(path: Path, entries: dict[str, dict]) -> None:
     atomic_json_write(path, entries, indent=None, mode=0o600)
 
 
-def _update(home: Path | str, session_key: str, mutate, what: str) -> None:
-    """Load → ``mutate(entries)`` → store under the lock; ``mutate`` returns None to skip the write."""
+def _update_path(path, session_key: str, mutate, what: str) -> None:
+    """Load, ``mutate(entries)``, store under the lock; ``mutate`` returns None to skip the write."""
     try:
         with _lock:
-            path = _marker_path(home)
             entries = mutate(_load(path))
             if entries is not None:
                 _store(path, entries)
     except Exception:
         logger.debug("failed to %s turn marker for %s", what, session_key, exc_info=True)
+
+
+def _update(home, session_key: str, mutate, what: str) -> None:
+    """Update the interrupted-turn marker file (delegates to _update_path)."""
+    _update_path(_marker_path(home), session_key, mutate, what)
+
+
+def _update_cancelled(home, session_key: str, mutate, what: str) -> None:
+    """Update the cancelled-turn file (delegates to _update_path)."""
+    _update_path(_cancelled_path(home), session_key, mutate, what)
+
+
+def _prune_cancelled(entries: dict[str, dict], now: float) -> dict[str, dict]:
+    fresh = {k: e for k, e in entries.items() if now - _cancelled_at(e) <= _MAX_AGE_SECS}
+    if len(fresh) <= _MAX_ENTRIES:
+        return fresh
+    return dict(sorted(fresh.items(), key=lambda item: _cancelled_at(item[1]), reverse=True)[:_MAX_ENTRIES])
 
 
 def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attempts: int = 0,
@@ -104,3 +131,41 @@ def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | Non
                 "auto_continue": bool(entry.get("auto_continue", True))}
     except Exception:
         return None
+def record_turn_cancelled(home, session_key: str) -> None:
+    """Persist an absolute stop flag for a user-cancelled turn.
+
+    Written by ``session.interrupt`` (Stop). Checked first by the auto-continue
+    scheduler and the external supervisor: a cancelled turn is never revived,
+    even if its crash marker survived. Best-effort, never raises.
+    """
+    if not session_key:
+        return
+    now = time.time()
+    entry = {"cancelled_at": now}
+    _update_cancelled(
+        home, session_key,
+        lambda entries: {**_prune_cancelled(entries, now), session_key: entry},
+        "record-cancel",
+    )
+
+
+def is_turn_cancelled(home, session_key: str) -> bool:
+    """True when the user cancelled this turn (absolute stop signal)."""
+    if not session_key:
+        return False
+    try:
+        with _lock:
+            entry = _load(_cancelled_path(home)).get(session_key)
+        return isinstance(entry, dict) and bool(entry.get("cancelled_at"))
+    except Exception:
+        return False
+
+
+def clear_turn_cancelled(home, session_key: str) -> None:
+    """Remove the cancel flag (only when a brand-new user turn starts on the key)."""
+    if session_key:
+        _update_cancelled(
+            home, session_key,
+            lambda e: {k: v for k, v in e.items() if k != session_key} if session_key in e else None,
+            "clear-cancel",
+        )

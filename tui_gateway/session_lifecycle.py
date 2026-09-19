@@ -412,6 +412,14 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
         session["queued_prompt"] = None
         session.pop("queued_prompts", None)
         session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
+    with contextlib.suppress(Exception):
+        from hermes_constants import get_hermes_home as _get_cancel_home
+        from tui_gateway.turn_marker import record_turn_cancelled as _record_turn_cancelled
+        _cancel_home = session.get("profile_home") or _get_cancel_home()
+        for _ck in {str(session.get("session_key") or ""),
+                    str(session.get("_active_turn_marker_key") or "")}:
+            if _ck:
+                _record_turn_cancelled(_cancel_home, _ck)
     if should_interrupt:
         # Sibling of gateway/run_agent_cache.py::_interrupt_and_clear_session: a user-initiated stop of a
         # live TUI/desktop turn is the same "loop is gone" event for plugins holding per-turn external

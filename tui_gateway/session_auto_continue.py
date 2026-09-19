@@ -65,6 +65,9 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     home = _session_home(session)
     if (marker := read_turn_marker(home, session_key)) is None:
         return None
+    if is_turn_cancelled(home, session_key):
+        clear_turn_marker(home, session_key)  # cancelled: absolute stop, retire any crash marker
+        return None
     if not marker.get("auto_continue", True):
         return None  # The mailbox owns recovery and receipt identity for imported turns.
     enabled, freshness_secs, max_attempts = _auto_continue_config()
