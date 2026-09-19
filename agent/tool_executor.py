@@ -624,6 +624,50 @@ def _blocked_tool_result(agent, ref: _ToolCallRef, *, block_message: Optional[st
     return result
 
 
+def _recovery_home_and_key(agent) -> tuple:
+    """(HERMES_HOME, session_key) for durable recovery receipts, or (None, None)."""
+    try:
+        session_key = str(getattr(agent, "session_id", "") or "")
+        if not session_key:
+            return None, None
+        home = getattr(agent, "profile_home", None)
+        if home is None:
+            from hermes_constants import get_hermes_home
+            home = get_hermes_home()
+        return home, session_key
+    except Exception:
+        return None, None
+
+
+def _recovery_completed_receipt(agent, ref: _ToolCallRef):
+    """Durable receipt when this exact tool effect already completed (hard idempotency)."""
+    try:
+        home, session_key = _recovery_home_and_key(agent)
+        if home is None:
+            return None
+        from tui_gateway.tool_receipts import find_completed_receipt
+        args = ref.args if isinstance(ref.args, dict) else {}
+        return find_completed_receipt(home, session_key, ref.name, args)
+    except Exception:
+        logger.debug("recovery receipt lookup failed", exc_info=True)
+        return None
+
+
+def _record_recovery_skip(agent, ref: _ToolCallRef, receipt: dict) -> None:
+    """Persist skip provenance so audits distinguish replay from execution."""
+    try:
+        home, session_key = _recovery_home_and_key(agent)
+        if home is None:
+            return
+        from tui_gateway.tool_receipts import record_tool_receipt
+        record_tool_receipt(
+            home, session_key, ref.call_id, ref.name,
+            ref.args if isinstance(ref.args, dict) else {},
+            f"SKIPPED_ALREADY_COMPLETED: reused {receipt.get('call_id')}",
+            ok=True, result=receipt.get("result"), skipped=True)
+    except Exception:
+        logger.debug("recovery skip receipt failed", exc_info=True)
+
 def _pre_tool_block(agent, ref: _ToolCallRef):
     """Run ``pre_tool_call`` plugin hooks; returns ``(block_message, final_args)`` with any
     hook-modified args applied. Hook failures never block."""
@@ -684,6 +728,19 @@ def _dispatch_authorized_once(
             agent, ref,
             block_message=block_message, block_error_type=block_error_type, guardrail_decision=guardrail_decision,
         )
+
+    _recovery_receipt = _recovery_completed_receipt(agent, ref)
+    if isinstance(_recovery_receipt, dict) and _recovery_receipt.get("result") is not None:
+        _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
+        state.blocked = False
+        _record_recovery_skip(agent, ref, _recovery_receipt)
+        skipped_result = str(_recovery_receipt["result"])
+        ref.emit_post(agent, skipped_result, status="skipped_already_completed", duration_ms=0)
+        logger.info(
+            "SKIPPED_ALREADY_COMPLETED tool=%s call_id=%s reused=%s fingerprint=%s",
+            ref.name, ref.call_id, _recovery_receipt.get("call_id"),
+            _recovery_receipt.get("fingerprint"))
+        return skipped_result
 
     if ref.name == "memory":
         agent._turns_since_memory = 0

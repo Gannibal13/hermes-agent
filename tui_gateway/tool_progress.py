@@ -288,7 +288,7 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
             _receipt_home = _receipt_session.get("profile_home") or _receipt_home_fn()
             record_tool_receipt(_receipt_home, str(_receipt_session.get("session_key")),
                                 str(tool_call_id), str(name), args if isinstance(args, dict) else {},
-                                summary or f"{name} completed", ok=_receipt_ok)
+                                summary or f"{name} completed", ok=_receipt_ok, result=result)
     if _session_verbose(sid) and (result_text := _tool_result_text(result)):
         payload["result_text"] = result_text
     todo_state = _normalize_todo_state(payload.get("result")) if name in _TODO_TOOL_NAMES else None

@@ -32,6 +32,7 @@ _MAX_AGE_SECS = 24 * 3600
 _MAX_SESSIONS = 64
 _MAX_CALLS_PER_SESSION = 128
 _MAX_SUMMARY_CHARS = 2_000
+_MAX_RESULT_CHARS = 32_768
 
 _lock = threading.Lock()
 
@@ -87,14 +88,23 @@ def _store(path: Path, entries: dict[str, dict]) -> None:
 
 
 def record_tool_receipt(home: Path | str, session_key: str, tool_call_id: str, name: str,
-                        args: Any, summary: str, *, ok: bool = True) -> None:
-    """Persist one completed tool call. Best-effort, never raises."""
+                        args: Any, summary: str, *, ok: bool = True, result: Any = None,
+                        skipped: bool = False) -> None:
+    """Persist one completed tool call. Best-effort, never raises.
+
+    ``result`` (capped) is the replay payload the executor returns instead of
+    re-executing an already-completed side effect. ``skipped`` marks receipts
+    written BY a skip (replay provenance); only real executions authorize skips.
+    """
     if not session_key or not tool_call_id:
         return
     now = time.time()
-    receipt = {"name": str(name), "fingerprint": fingerprint_tool(name, args),
+    receipt = {"call_id": str(tool_call_id), "name": str(name),
+               "fingerprint": fingerprint_tool(name, args),
                "summary": str(summary or "")[:_MAX_SUMMARY_CHARS],
-               "ok": bool(ok), "completed_at": now}
+               "ok": bool(ok), "completed_at": now, "skipped": bool(skipped)}
+    if result is not None:
+        receipt["result"] = str(result)[:_MAX_RESULT_CHARS]
     try:
         with _lock:
             path = _receipts_path(home)
@@ -131,18 +141,29 @@ def completed_fingerprints(home: Path | str, session_key: str) -> dict[str, str]
     return out
 
 
-def should_skip_tool_call(home: Path | str, session_key: str, name: str, args: Any) -> bool:
-    """True when this exact tool effect already completed successfully."""
+def find_completed_receipt(home: Path | str, session_key: str, name: str, args: Any) -> dict | None:
+    """The real (non-skipped, successful) receipt for this exact tool effect, if any."""
     if not session_key:
-        return False
+        return None
     want = fingerprint_tool(name, args)
     try:
         with _lock:
             calls = _load(_receipts_path(home)).get(session_key)
         if not isinstance(calls, dict):
-            return False
-        return any(isinstance(r, dict) and r.get("ok") and r.get("fingerprint") == want
-                   for r in calls.values())
+            return None
+        for receipt in calls.values():
+            if (isinstance(receipt, dict) and receipt.get("ok")
+                    and not receipt.get("skipped") and receipt.get("fingerprint") == want):
+                return dict(receipt)
+        return None
+    except Exception:
+        return None
+
+
+def should_skip_tool_call(home: Path | str, session_key: str, name: str, args: Any) -> bool:
+    """True when this exact tool effect already completed successfully."""
+    try:
+        return find_completed_receipt(home, session_key, name, args) is not None
     except Exception:
         return False
 
