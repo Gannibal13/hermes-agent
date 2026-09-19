@@ -55,7 +55,7 @@ def test_standalone_no_hermes_imports():
         if ln.split("#", 1)[0].strip().startswith(("import ", "from "))
     ]
     allowed_roots = {
-        "__future__", "argparse", "json", "os", "sys", "tempfile", "time",
+        "__future__", "argparse", "ctypes", "json", "os", "sys", "tempfile", "time",
         "pathlib", "pathlib.Path",
     }
     for stmt in imports:
@@ -127,3 +127,25 @@ def test_backend_dead_means_recovery_ready(supervisor, tmp_path):
     )
     verdicts = {r["session_key"]: r["verdict"] for r in out}
     assert verdicts["sk-backend"] == "recovery_ready"
+
+
+def test_default_pid_alive_real_process(supervisor):
+    import os
+    import subprocess
+    import sys
+    import time
+
+    assert supervisor._default_pid_alive(os.getpid()) is True
+    assert supervisor._default_pid_alive(-3) is False
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+    try:
+        assert supervisor._default_pid_alive(proc.pid) is True
+    finally:
+        proc.kill()
+        proc.wait(timeout=30)
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if supervisor._default_pid_alive(proc.pid) is False:
+            break
+        time.sleep(0.2)
+    assert supervisor._default_pid_alive(proc.pid) is False

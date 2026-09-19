@@ -79,6 +79,37 @@ def _atomic_write_json(path: Path, payload) -> None:
             pass
 
 
+def _windows_pid_alive(pid: int) -> bool | None:
+    """True/False via OpenProcess; None when the check itself is unavailable."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return None
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x00100000 | 0x1000, False, pid)
+    except Exception:
+        return None
+    if not handle:
+        return False
+    try:
+        if kernel32.WaitForSingleObject(handle, 0) == 0:
+            return False
+        code = wintypes.DWORD()
+        if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            if code.value != 259:
+                return False
+        return True
+    except Exception:
+        return None
+    finally:
+        try:
+            kernel32.CloseHandle(handle)
+        except Exception:
+            pass
+
+
 def _default_pid_alive(pid: int) -> bool:
     try:
         pid = int(pid)
@@ -88,6 +119,10 @@ def _default_pid_alive(pid: int) -> bool:
         return False
     if pid == os.getpid():
         return True
+    if os.name == "nt":
+        decided = _windows_pid_alive(pid)
+        if decided is not None:
+            return decided
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
