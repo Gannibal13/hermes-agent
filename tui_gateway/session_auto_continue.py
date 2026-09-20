@@ -98,7 +98,14 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             logger.warning("auto-continue agent build failed for %s", sid, exc_info=True)
             err = {"error": {"message": "agent build failed"}}
         if err:  # leave the marker: the next resume retries (bounded by attempts)
+            _notif_release_turn(session)
             session["_auto_continue_scheduled"] = False
+            _emit("message.complete", sid, {
+                "text": "Unable to restore the interrupted turn right now. Retry session.resume to try again.",
+                "status": "error",
+                "error": "Unable to restore the interrupted turn right now; retryable.",
+                "recoverable": True,
+            })
             return
         with session["history_lock"]:
             if session.get("running") or session.get("_turn_cancel_requested") or session.get("_finalized"):
