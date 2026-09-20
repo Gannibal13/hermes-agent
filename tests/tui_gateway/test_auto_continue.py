@@ -557,13 +557,19 @@ def test_failed_agent_build_leaves_marker_for_retry(
         "_wait_agent",
         lambda session, rid, timeout=30.0: {"error": {"message": "boom"}},
     )
-    session = _session()
+    session = _session(running=True)
 
     result = server._maybe_schedule_auto_continue("sid", session, "session-key")
 
     assert result is not None
     assert not schedule_env
     assert session["_auto_continue_scheduled"] is False
+    assert session["running"] is False
+    complete = [payload for event, sid, payload in emits if event == "message.complete" and sid == "sid"]
+    assert len(complete) == 1
+    assert complete[0]["status"] == "error"
+    assert complete[0]["recoverable"] is True
+    assert "Retry session.resume" in complete[0]["text"]
     assert read_turn_marker(marker_home, "session-key") is not None
 
 
