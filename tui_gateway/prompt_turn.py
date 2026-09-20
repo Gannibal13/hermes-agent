@@ -148,6 +148,9 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True)
     it; the post-write cancel check closes the inverse race (Stop landed first, no file)."""
     marker_home = _session_home(session)
     marker_key = str(session.get("session_key") or "")
+    with session["history_lock"]:
+        if session.get("_active_turn_marker_key") == marker_key:
+            return marker_key
     marker_attempt = int(session.pop("_auto_continue_attempt", 0) or 0)
     marker_text = session.pop("_auto_continue_prompt", None) or text
     _marker_owner = None

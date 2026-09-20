@@ -239,6 +239,64 @@ def test_handled_failure_still_clears_marker(emits, turn_env, marker_home):
     assert read_turn_marker(marker_home, "session-key") is None
 
 
+@pytest.mark.parametrize("outcome", ["cancel", "error"])
+def test_deferred_submit_marks_before_agent_ready_and_retires_after_wait_outcome(
+    monkeypatch, marker_home, outcome
+):
+    """An accepted prompt is recoverable while its deferred agent is still building."""
+    ready = threading.Event()
+    session = _session(agent=None, agent_ready=ready)
+    sid = "deferred-sid"
+    server._sessions[sid] = session
+    captured = []
+    writes = []
+
+    class _HeldThread:
+        def __init__(self, target=None, **_kwargs):
+            captured.append(target)
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(server, "_sess_nowait", lambda params, rid: (session, None))
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda sid, session: None)
+    monkeypatch.setattr(server, "_persist_session_row_for_submit", lambda rid, session: None)
+    monkeypatch.setattr(server, "_restart_completed_failed_agent_build", lambda *args: False)
+    monkeypatch.setattr(server, "_start_agent_build", lambda sid, session: None)
+    monkeypatch.setattr(server.threading, "Thread", _HeldThread)
+    monkeypatch.setattr(
+        server,
+        "record_turn_start",
+        lambda home, key, prompt, **kwargs: (
+            writes.append((home, key, prompt)),
+            record_turn_start(home, key, prompt, **kwargs),
+        )[1],
+    )
+    monkeypatch.setattr(
+        server,
+        "_wait_agent_for_prompt",
+        lambda session, rid, sid: (
+            None if outcome == "cancel" else {"error": {"message": "agent initialization failed"}}
+        ),
+    )
+
+    response = server._methods["prompt.submit"]("rid", {"session_id": sid, "text": "recover me"})
+
+    assert response["result"]["status"] == "streaming"
+    assert not ready.is_set()
+    assert read_turn_marker(marker_home, "session-key")["prompt"] == "recover me"
+    assert writes == [(marker_home, "session-key", "recover me")]
+
+    if outcome == "cancel":
+        session["_turn_cancel_requested"] = True
+
+    captured[0]()
+
+    assert read_turn_marker(marker_home, "session-key") is None
+    assert "_active_turn_marker_key" not in session
+    server._sessions.pop(sid, None)
+
+
 def test_hosted_terminal_receipt_commits_before_marker_retire(
     emits, turn_env, marker_home
 ):
@@ -510,4 +568,3 @@ def test_failed_agent_build_leaves_marker_for_retry(
 
 
 # ── End to end: continuation runs a real turn and clears the marker ────
-

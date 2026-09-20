@@ -485,7 +485,19 @@ def _persist_session_row_for_submit(rid, session):
     return error
 
 
-def _run_after_agent_ready(rid, sid, session, text, display_kind, hosted_terminal_callback, turn_author=None):
+def _retire_waiting_turn_marker(session, marker_key: str) -> None:
+    """Retire the marker only while this accepted prompt still owns it."""
+    with session["history_lock"]:
+        if session.get("_active_turn_marker_key") != marker_key:
+            return
+        session.pop("_active_turn_marker_key", None)
+    _retire_turn_marker(session, marker_key)
+
+
+def _run_after_agent_ready(
+    rid, sid, session, text, display_kind, hosted_terminal_callback, turn_author=None,
+    marker_key="",
+):
     """Turn thread body: patient wait for a deferred build (a slow build must not eat the
     accepted in-flight message), then run."""
     # The wait delivers the prompt when the still-running build completes, honors a cancel promptly, notices
@@ -501,18 +513,25 @@ def _run_after_agent_ready(rid, sid, session, text, display_kind, hosted_termina
         with session["history_lock"]:
             session["running"] = False
             session["last_active"] = time.time()
+        _retire_waiting_turn_marker(session, marker_key)
         _emit("session.info", sid, _session_info(session.get("agent"), session))
         return
     with session["history_lock"]:
         if session.get("_turn_cancel_requested") or not session.get("running"):
+            cancelled = bool(session.get("_turn_cancel_requested"))
             session["running"] = False
             _clear_inflight_turn(session)
             # Without this emit the turn vanishes silently after {"status": "streaming"}.
             _emit("error", sid, {"message": (
                 "Turn cancelled before the agent was ready"
-                if session.get("_turn_cancel_requested")
+                if cancelled
                 else "Session no longer running before the agent was ready")})
-            return
+            should_retire = True
+        else:
+            should_retire = False
+    if should_retire:
+        _retire_waiting_turn_marker(session, marker_key)
+        return
     _run_prompt_submit(
         rid, sid, session, text, display_kind=display_kind,
         terminal_callback=hosted_terminal_callback, turn_author=turn_author)
@@ -663,12 +682,14 @@ def _(rid, params: dict) -> dict:
             isolated_response["error"].get("message", "unknown error"))
     if (err := _persist_session_row_for_submit(rid, session)) is not None:
         return err
+    marker_key = _record_turn_marker(
+        session, text, auto_continue=hosted_terminal_callback is None)
     # A completed FAILED build must not wedge the session: rebuild, don't replay it.
     if not _restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
         _start_agent_build(sid, session)
     run_thread = threading.Thread(
         target=lambda: _run_after_agent_ready(
-            rid, sid, session, text, display_kind, hosted_terminal_callback, turn_author),
+            rid, sid, session, text, display_kind, hosted_terminal_callback, turn_author, marker_key),
         daemon=True)
     # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
     session["_run_thread"] = run_thread
