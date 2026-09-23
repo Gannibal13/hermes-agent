@@ -8,11 +8,13 @@ import {
   useThreadRuntime
 } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
-import { type FC, type ReactNode, useCallback, useMemo, useState } from 'react'
+import { type FC, type ReactNode, useCallback, useContext, useMemo, useState } from 'react'
 import { useInRouterContext, useNavigate } from 'react-router'
 
+import { requestModelMenuToggle } from '@/app/chat/composer/focus'
 import { useSessionView } from '@/app/chat/session-view'
 import { SETTINGS_ROUTE } from '@/app/routes'
+import { dispatchedTo } from '@/components/assistant-ui/thread/agent-delivery'
 import { ChangedFilesCard } from '@/components/assistant-ui/thread/changed-files-card'
 import {
   contentHasVisibleText,
@@ -21,17 +23,25 @@ import {
 } from '@/components/assistant-ui/thread/content'
 import { MESSAGE_PARTS_COMPONENTS } from '@/components/assistant-ui/thread/message-parts'
 import { ReactionPicker } from '@/components/assistant-ui/thread/message-reactions'
+import { ResponseMessageIds } from '@/components/assistant-ui/thread/response-group'
 import { ResponseLoadingIndicator, TurnActivityIndicator } from '@/components/assistant-ui/thread/status'
 import { MessageTimelineTimestamp } from '@/components/assistant-ui/thread/timeline-timestamp'
 import { useMessageReactions, useTapbackDoubleClick } from '@/components/assistant-ui/thread/use-message-reactions'
 import { AGENT_MESSAGE_RE } from '@/components/assistant-ui/thread/user-message'
+import { isApprovalActivity, isCurrentTurnMessage } from '@/components/assistant-ui/tool/approval-activity'
 import { TooltipIconButton } from '@/components/assistant-ui/tooltip-icon-button'
 import { formatElapsed } from '@/components/chat/activity-timer'
 import { PreviewAttachment } from '@/components/chat/preview-attachment'
 import { Codicon } from '@/components/ui/codicon'
 import { CopyButton } from '@/components/ui/copy-button'
 import { useI18n } from '@/i18n'
-import { errorRecoveryPlan, type ErrorSurface, formatErrorDiagnostics, isOAuthReauthSurface } from '@/lib/error-surface'
+import {
+  errorRecoveryPlan,
+  type ErrorSurface,
+  formatErrorDiagnostics,
+  formatLimitReset,
+  isOAuthReauthSurface
+} from '@/lib/error-surface'
 import { errorCardText } from '@/lib/error-surface-copy'
 import { triggerHaptic } from '@/lib/haptics'
 import {
@@ -54,6 +64,7 @@ import { openFreeTierSignIn } from '@/store/free-tier-sign-in'
 import { notifyError } from '@/store/notifications'
 import { startManualProviderOAuth } from '@/store/onboarding'
 import { $activeGatewayProfile, normalizeProfileKey, requestFreshSession } from '@/store/profile'
+import { sessionApprovalRequest } from '@/store/prompts'
 import { requestSendDiagnostics } from '@/store/send-diagnostics'
 import { $connection, $currentModel, setModelPickerOpen } from '@/store/session'
 import { sessionTileDelegate } from '@/store/session-states'
@@ -93,7 +104,12 @@ export const AssistantMessage: FC<AssistantMessageProps> = props => {
   // <sender>", expandable), mirroring the sender-side notice the previous
   // user message already renders as. Grok-bots parity: the transcript shows
   // events; the texts are one click away. Detection: the immediately
-  // preceding user message matches AGENT_MESSAGE_RE.
+  // preceding user message matches AGENT_MESSAGE_RE — UNLESS that delivery
+  // answers a `message_agent` dispatch this bot itself sent to the sender
+  // earlier in the thread. Seen from the dispatching bot, the inbound row is
+  // the teammate's answer and the next assistant message is the report to
+  // the human (#114629); folding it hid the substance of the turn behind a
+  // "Replied to" row nothing was ever sent through.
   const interAgentSender = useAuiState(s => {
     const messages = s.thread.messages
 
@@ -112,7 +128,13 @@ export const AssistantMessage: FC<AssistantMessageProps> = props => {
         if (prev.role === 'user') {
           const match = AGENT_MESSAGE_RE.exec(messageContentText(prev.content as never).trim())
 
-          return match ? (match[1] || match[3] || 'agent').trim() : null
+          if (!match) {
+            return null
+          }
+
+          const sender = (match[1] || match[3] || 'agent').trim()
+
+          return dispatchedTo(messages.slice(0, j), [match[1], match[2], match[3]]) ? null : sender
         }
       }
 
@@ -185,6 +207,9 @@ const AssistantMessageBody: FC<AssistantMessageProps & { collapsedNotice?: null 
 }) => {
   const messageId = useAuiState(s => s.message.id)
   const messageRuntime = useMessageRuntime()
+  const threadRuntime = useThreadRuntime()
+  const responseIds = useContext(ResponseMessageIds)
+  const responseTail = responseIds.length === 0 || responseIds.at(-1) === messageId
   const { t } = useI18n()
 
   // PERF: this component must NOT subscribe to the streaming text, and no
@@ -194,6 +219,18 @@ const AssistantMessageBody: FC<AssistantMessageProps & { collapsedNotice?: null 
   // the markdown part and the tiny status leaves — not the footer, the
   // preview block, or this root.
   const hasVisibleText = useAuiState(s => contentHasVisibleText(s.message.content))
+  const sessionId = useStore(useSessionView().$runtimeId)
+  const approval = useStore(useMemo(() => sessionApprovalRequest(sessionId), [sessionId]))
+
+  const activityOnly = useAuiState(
+    state =>
+      isCurrentTurnMessage(state.thread.messages, state.message.id) &&
+      state.message.content.some(part => part.type === 'tool-call' && isApprovalActivity(part)) &&
+      state.message.content.every(
+        part => (part.type === 'tool-call' && isApprovalActivity(part)) || (part.type === 'text' && !part.text.trim())
+      )
+  )
+
   // Sealed mid-turn commentary keeps its text but not the footer, so a
   // tool-heavy turn doesn't grow a copy/refresh bar per paragraph (see
   // ChatMessage.interim).
@@ -203,7 +240,16 @@ const AssistantMessageBody: FC<AssistantMessageProps & { collapsedNotice?: null 
   // stable across the 30 Hz delta stream, so this adds no per-token renders).
   const turnDurationS = useAuiState(s => s.message.metadata?.custom?.durationS as number | undefined)
 
-  const getMessageText = useCallback(() => messageContentText(messageRuntime.getState().content), [messageRuntime])
+  const getMessageText = useCallback(
+    () =>
+      responseIds.length
+        ? responseIds
+            .map(id => messageContentText(threadRuntime.getMessageById(id).getState().content))
+            .filter(Boolean)
+            .join('\n\n')
+        : messageContentText(messageRuntime.getState().content),
+    [messageRuntime, responseIds, threadRuntime]
+  )
 
   // useEnterAnimation consults `enabled` ONLY when its callback ref fires,
   // i.e. at mount: the hook parks the value in a ref and returns a
@@ -226,6 +272,7 @@ const AssistantMessageBody: FC<AssistantMessageProps & { collapsedNotice?: null 
         'group flex w-full min-w-0 max-w-full flex-col gap-0 self-start overflow-hidden',
         collapsedNotice && 'pb-(--conversation-turn-gap)'
       )}
+      data-approval-activity-only={approval && activityOnly ? '' : undefined}
       data-role="assistant"
       data-slot="aui_assistant-message-root"
       // Collapsed inter-agent rows never carried the tapback listener; keeping
@@ -269,7 +316,7 @@ const AssistantMessageBody: FC<AssistantMessageProps & { collapsedNotice?: null 
             </MessagePrimitive.Error>
           </div>
           <MessageTimelineTimestamp className="px-(--message-text-indent) pt-0.5" suppressIfDuplicatePart />
-          {hasVisibleText && !isInterim && (
+          {hasVisibleText && !isInterim && responseTail && (
             <AssistantFooter
               durationS={turnDurationS}
               getMessageText={getMessageText}
@@ -514,6 +561,32 @@ const SettingsLinkAction: FC<{ icon?: ReactNode; label: string; to: string }> = 
   )
 }
 
+// "Switch provider" for a provider/endpoint/auth/billing failure: opens the
+// composer pill's LIVE model menu, whose picks go through `model.switch` on
+// this session (use-model-menu-controller.ts) — the same menu the
+// `composer.modelPicker` hotkey toggles. Settings → Models only changes the
+// default for NEW sessions, so it is the fallback for when no chat surface is
+// on screen (requestModelMenuToggle returns false), not the first stop.
+// Targeting follows requestModelMenuToggle: the pane under the pointer, else
+// the active composer — a click on this card puts the pointer in its own pane.
+const SwitchProviderAction: FC<{ label: string }> = ({ label }) => {
+  const navigate = useNavigate()
+
+  const switchProvider = useCallback(() => {
+    triggerHaptic('selection')
+
+    if (!requestModelMenuToggle()) {
+      navigate(`${SETTINGS_ROUTE}?tab=config:model`)
+    }
+  }, [navigate])
+
+  return (
+    <button className="aui-error-action" onClick={switchProvider} type="button">
+      {label}
+    </button>
+  )
+}
+
 // Settings → Keys deep link for a rejected API key: `?tab=keys` plus
 // `&key=<ENV>` when the descriptor names the env var (keys-settings.tsx
 // scrolls to and expands that row). Older backends omit `api_key_env`; the
@@ -701,6 +774,9 @@ const ErrorRecoveryActions: FC = () => {
   }, [])
 
   const localFolders = Boolean(window.hermesDesktop?.logsRoot)
+  // The provider's own reset moment (429 Retry-After / resets_at), so the user knows WHEN
+  // Retry will work instead of guessing (#98852). Informational only: no automatic retry.
+  const limitReset = formatLimitReset(surface?.resetsAt)
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
@@ -748,9 +824,12 @@ const ErrorRecoveryActions: FC = () => {
           </button>
         </ActionBarPrimitive.Reload>
       )}
-      {plan.switchProvider && inRouter && (
-        <SettingsLinkAction label={copy.errorSwitchProvider} to={`${SETTINGS_ROUTE}?tab=config:model`} />
+      {plan.retry && limitReset && (
+        <span className="px-1 text-xs text-muted-foreground" data-testid="error-limit-reset">
+          {copy.errorLimitResets(limitReset)}
+        </span>
       )}
+      {plan.switchProvider && inRouter && <SwitchProviderAction label={copy.errorSwitchProvider} />}
       {localFolders && (
         <button className="aui-error-action" onClick={() => void openLogs()} type="button">
           {remoteConnection ? copy.errorOpenDesktopLogs : copy.errorOpenLogs}
