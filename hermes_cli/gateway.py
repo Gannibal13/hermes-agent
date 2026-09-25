@@ -829,7 +829,14 @@ def find_windows_gateway_services(
                 if not owned:
                     try:
                         service_binpath = str(_scm_service_field(service, "binpath") or "")
-                    except psutil_module.AccessDenied:
+                    except (psutil_module.AccessDenied, OSError):
+                        # A service the user could not `sc stop` either (AccessDenied) is never
+                        # Hermes's, and neither is one whose config the SCM cannot describe at
+                        # all: QueryServiceConfigW fails with WinError 15100 ("resource loader
+                        # failed to find MUI file") for a system service whose DisplayName/
+                        # Description point at a .mui that is missing (e.g. IsolationSession,
+                        # IsoSessionCore). One unreadable third-party service must not abort the
+                        # enumeration for every other service on the machine.
                         continue
                     owned = hermes_owns_windows_service(service_name, service_binpath, hermes_roots)
                 if not owned:
