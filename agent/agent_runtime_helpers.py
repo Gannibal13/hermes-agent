@@ -2142,7 +2142,8 @@ def _persist_switch_billing_route(agent) -> None:
 
 
 def switch_model(
-    agent, new_model, new_provider, api_key='', base_url='', api_mode='', capabilities=None
+    agent, new_model, new_provider, api_key='', base_url='', api_mode='', capabilities=None,
+    routing_source="manual",
 ):
     """Switch the model/provider in-place for a live agent (rebuild clients, caching flags,
     compressor). Mirrors ``_try_activate_fallback()`` but also updates ``_primary_runtime`` so
@@ -2206,6 +2207,21 @@ def switch_model(
         old_model, old_provider, new_model, new_provider,
     )
     _persist_switch_billing_route(agent)
+    router = getattr(agent, "_global_model_router", None)
+    try:
+        from agent.global_model_router import GlobalModelRouter
+        if not isinstance(router, GlobalModelRouter):
+            router = None
+    except Exception:
+        router = None
+    if router is not None:
+        try:
+            router.record_active_route(
+                agent, source=routing_source,
+                reason="explicit model switch" if routing_source == "manual" else f"{routing_source} route applied",
+            )
+        except Exception:
+            logger.warning("Global Model Router switch bookkeeping failed", exc_info=True)
 
 
 def _pre_tool_block_message(agent, function_name, function_args, effective_task_id, tool_call_id, middleware_trace):

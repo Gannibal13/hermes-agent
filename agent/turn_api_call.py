@@ -123,13 +123,21 @@ def perform_api_call(
         if _model_request_active is not None:
             _model_request_active.set()
     router = getattr(agent, "_global_model_router", None)
+    try:
+        from agent.global_model_router import GlobalModelRouter
+        if not isinstance(router, GlobalModelRouter):
+            router = None
+    except Exception:
+        router = None
     router_lease = None
+    router_call_started = time.monotonic()
     if router is not None and getattr(agent, "provider", None) and getattr(agent, "model", None):
         try:
             import threading as _threading
             holder = f"{getattr(agent, 'session_id', '')}:{_threading.get_ident()}"
+            router_provider = router.provider_label_for_agent(agent)
             router_lease = router.acquire_lease(
-                str(agent.provider), str(agent.model), holder=holder, ttl_seconds=300
+                router_provider, str(agent.model), holder=holder, ttl_seconds=300
             )
             agent._global_route_lease = router_lease
             agent._global_route_lease_contended = not router_lease.acquired
@@ -157,6 +165,23 @@ def perform_api_call(
                 failure_type = "error"
             with suppress(Exception):
                 router.report_failure(router_lease.lease_id, failure_type)
+        if router is not None and getattr(agent, "provider", None) and getattr(agent, "model", None):
+            text = str(exc).lower()
+            if "401" in text or "403" in text or "unauthorized" in text or "authentication" in text:
+                health_status = "AUTH_FAILED"
+            elif "429" in text or "rate limit" in text:
+                health_status = "RATE_LIMITED"
+            elif any(x in text for x in ("connection", "timeout", "temporarily unavailable", "503")):
+                health_status = "OFFLINE"
+            else:
+                health_status = "DEGRADED"
+            with suppress(Exception):
+                router.record_health(
+                    router.provider_label_for_agent(agent), str(agent.model), health_status,
+                    latency_ms=(time.monotonic() - router_call_started) * 1000,
+                    auth_type=router.auth_type_for_agent(agent),
+                    error_type=type(exc).__name__,
+                )
         raise
     else:
         if router is not None and router_lease is not None and router_lease.acquired:
@@ -168,6 +193,13 @@ def perform_api_call(
                 tokens = 0
             with suppress(Exception):
                 router.report_success(router_lease.lease_id, tokens_used=tokens)
+        if router is not None and getattr(agent, "provider", None) and getattr(agent, "model", None):
+            with suppress(Exception):
+                router.record_health(
+                    router.provider_label_for_agent(agent), str(agent.model), "ONLINE",
+                    latency_ms=(time.monotonic() - router_call_started) * 1000,
+                    auth_type=router.auth_type_for_agent(agent),
+                )
     finally:
         agent._global_route_lease = None
         with _bracket:

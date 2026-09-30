@@ -2316,6 +2316,22 @@ def init_agent(
     _configure_ollama_num_ctx(agent, _model_cfg, _config_context_length)
     _emit_compression_summary(agent, cs)
     _snapshot_primary_runtime(agent)
+    # Final registration happens only after session state, compressor and the
+    # primary runtime snapshot exist.  The early attach in _finalize_routing is
+    # intentionally side-effect-light; this is the runtime proof/decision hook.
+    _router = getattr(agent, "_global_model_router", None)
+    if _router is not None:
+        try:
+            _configured_model = (_agent_cfg.get("model") or {}) if isinstance(_agent_cfg, dict) else {}
+            _router.register_agent(
+                agent,
+                configured_provider=str(_configured_model.get("provider") or ""),
+                configured_model=str(
+                    _configured_model.get("default") or _configured_model.get("model") or ""
+                ),
+            )
+        except Exception:
+            logger.warning("Global Model Router runtime registration failed", exc_info=True)
 
 
 __all__ = ["init_agent"]

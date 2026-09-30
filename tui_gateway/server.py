@@ -2168,6 +2168,10 @@ class _RuntimeFallbackResolution(NamedTuple):
     runtime: dict
     selected_model: str | None
     used_fallback: bool
+    startup_failure: dict | None = None
+
+
+_router_startup_failure_local = threading.local()
 
 
 def _resolve_runtime_with_fallback(resolve_kwargs: dict | None = None) -> _RuntimeFallbackResolution:
@@ -2192,7 +2196,13 @@ def _resolve_runtime_with_fallback(resolve_kwargs: dict | None = None) -> _Runti
                 runtime = resolve_runtime_provider(**fb_kwargs)
                 logging.getLogger(__name__).warning(
                     "Primary auth failed (%s), falling back to %s model %s", primary_exc, fb_provider, fb_model)
-                return _RuntimeFallbackResolution(runtime, fb_model, True)
+                primary = resolve_kwargs or {}
+                startup_failure = {
+                    "provider": str(primary.get("requested") or "unknown"),
+                    "model": str(primary.get("target_model") or "unknown"),
+                    "error_type": type(primary_exc).__name__,
+                }
+                return _RuntimeFallbackResolution(runtime, fb_model, True, startup_failure)
             except Exception:
                 continue
         raise
@@ -2226,6 +2236,7 @@ def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str
         resolve_kwargs = {"requested": requested_provider, "target_model": model or None}
         overrides = {}
     resolution = _resolve_runtime_with_fallback(resolve_kwargs)
+    _router_startup_failure_local.value = resolution.startup_failure
     if resolution.used_fallback:
         if not resolution.selected_model:
             raise RuntimeError("Auth fallback resolved without a model")
@@ -2277,6 +2288,8 @@ def _make_agent(
     register_from_config(cfg)
     system_prompt = _startup_system_prompt(cfg, session_id or key)
     model, runtime = _resolve_agent_model_runtime(model_override, provider_override)
+    _startup_failure = getattr(_router_startup_failure_local, "value", None)
+    _router_startup_failure_local.value = None
     _pr = _load_provider_routing()
     platform = _resolve_agent_platform(platform_override)
     ignore_rules = is_truthy_value(os.environ.get("HERMES_IGNORE_RULES"))
@@ -2299,6 +2312,18 @@ def _make_agent(
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
         skip_context_files=ignore_rules, skip_memory=ignore_rules, fallback_model=_load_fallback_model(),
         **_agent_cbs(sid))
+    _router = getattr(agent, "_global_model_router", None)
+    if isinstance(_startup_failure, dict) and _router is not None:
+        try:
+            _router.record_startup_auth_failure(
+                **_startup_failure, session_id=str(session_id or key)
+            )
+            _router.record_active_route(
+                agent, source="fallback", reason="startup authentication fallback",
+                set_primary=False,
+            )
+        except Exception:
+            logger.warning("Global Model Router startup-auth bookkeeping failed", exc_info=True)
     if context_cwd_is_launch_artifact is None:
         with _sessions_lock:
             context_cwd_is_launch_artifact = _context_cwd_is_launch_artifact(_sessions.get(sid))

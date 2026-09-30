@@ -10,6 +10,7 @@ Scope: **new files only** — no changes to existing code, config, or deps.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -29,7 +30,12 @@ from typing import Any, Generator, Optional, Tuple
 
 _DEFAULT_DB_NAME = "global_model_router.db"
 _DEFAULT_COOLDOWN_SECONDS = 300
+_HEALTH_REPROBE_SECONDS = 300
 _QUOTA_TOKEN_ESTIMATE_FACTOR = 4  # chars / 4 ≈ tokens (rough heuristic)
+_DECISION_HISTORY_LIMIT = 200
+_LONG_CONTEXT_TOKENS = 200_000
+
+logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -52,6 +58,35 @@ class Capability(str, Enum):
     FUNCTION_CALLING = "function_calling"
 
 
+class ModelClass(str, Enum):
+    LOCAL_FAST = "local_fast"
+    FREE_FAST = "free_fast"
+    FREE_REASONING = "free_reasoning"
+    PAID_FAST = "paid_fast"
+    PAID_REASONING = "paid_reasoning"
+    LONG_CONTEXT = "long_context"
+    CODING = "coding"
+    VISION = "vision"
+    UNAVAILABLE = "unavailable"
+
+
+class HealthStatus(str, Enum):
+    ONLINE = "ONLINE"
+    DEGRADED = "DEGRADED"
+    AUTH_FAILED = "AUTH_FAILED"
+    RATE_LIMITED = "RATE_LIMITED"
+    OFFLINE = "OFFLINE"
+    UNCONFIGURED = "UNCONFIGURED"
+
+
+class RouteSource(str, Enum):
+    PIN = "pin"
+    MANUAL = "manual"
+    OMNIROUTE_AUTO = "omniroute_auto"
+    AUTOMATIC = "automatic"
+    FALLBACK = "fallback"
+
+
 @dataclass(frozen=True)
 class ContextWindow:
     max_tokens: int = 128_000
@@ -64,6 +99,7 @@ class Route:
     cost_per_1k: float
     capabilities: frozenset[Capability] = field(default_factory=frozenset)
     context_window: ContextWindow = field(default_factory=ContextWindow)
+    model_classes: frozenset[ModelClass] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)
@@ -92,6 +128,12 @@ def _canonical_model(model: str) -> str:
     """Lowercase, strip whitespace, resolve known aliases."""
     raw = model.strip().lower()
     return _MODEL_ALIAS_MAP.get(raw, raw)
+
+
+def is_omniroute_auto(provider: str, model: str, requested_provider: str = "") -> bool:
+    """True when OmniRoute, not this router, is the explicit decision owner."""
+    providers = {_canonical_provider(provider), _canonical_provider(requested_provider)}
+    return "omniroute" in providers and _canonical_model(model).startswith("auto/")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -126,12 +168,14 @@ class Decision:
     route: Route | None
     task_class: TaskClass
     reason: str
+    source: RouteSource = RouteSource.AUTOMATIC
 
     def to_snapshot(self) -> dict[str, Any]:
         """JSON-safe snapshot."""
         r: dict[str, Any] = {
             "task_class": self.task_class.value if isinstance(self.task_class, TaskClass) else str(self.task_class),
             "reason": self.reason,
+            "source": self.source.value if isinstance(self.source, RouteSource) else str(self.source),
         }
         if self.route is not None:
             r["route"] = {
@@ -140,6 +184,7 @@ class Decision:
                 "cost_per_1k": self.route.cost_per_1k,
                 "capabilities": sorted(c.value for c in self.route.capabilities),
                 "context_window": self.route.context_window.max_tokens,
+                "model_classes": sorted(c.value for c in self.route.model_classes),
             }
         else:
             r["route"] = None
@@ -211,6 +256,27 @@ CREATE TABLE IF NOT EXISTS cooldown (
     model      TEXT NOT NULL,
     expires_at REAL NOT NULL,
     PRIMARY KEY (provider, model)
+);
+
+CREATE TABLE IF NOT EXISTS provider_health (
+    provider    TEXT NOT NULL,
+    model       TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    latency_ms  REAL,
+    auth_type   TEXT NOT NULL DEFAULT '',
+    error_type  TEXT NOT NULL DEFAULT '',
+    checked_at  REAL NOT NULL,
+    PRIMARY KEY (provider, model)
+);
+
+CREATE TABLE IF NOT EXISTS routing_decisions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL DEFAULT '',
+    provider    TEXT NOT NULL,
+    model       TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    created_at  REAL NOT NULL
 );
 """
 
@@ -297,7 +363,382 @@ class GlobalModelRouter:
             cost_per_1k=route.cost_per_1k,
             capabilities=route.capabilities,
             context_window=route.context_window,
+            model_classes=route.model_classes,
         )
+
+    @staticmethod
+    def _capability_set(capabilities: dict[str, Any] | None) -> frozenset[Capability]:
+        raw = capabilities or {}
+        aliases = {
+            Capability.CODING: ("coding", "supports_coding"),
+            Capability.VISION: ("vision", "attachment", "supports_vision"),
+            Capability.REASONING: ("reasoning", "supports_reasoning"),
+            Capability.FUNCTION_CALLING: ("tools", "tool_call", "supports_tools"),
+        }
+        return frozenset(
+            capability
+            for capability, keys in aliases.items()
+            if any(raw.get(key) is True for key in keys)
+        )
+
+    def build_route(
+        self,
+        provider: str,
+        model: str,
+        *,
+        cost_per_1k: float | None = None,
+        capabilities: dict[str, Any] | None = None,
+        context_tokens: int | None = None,
+    ) -> Route:
+        """Build a conservative route from verified metadata.
+
+        Unknown capabilities stay unknown. Provider/model names are used only to
+        identify local/free transport classes; reasoning, coding and vision are
+        never inferred from marketing names.
+        """
+        cp, cm = _canonical_provider(provider), _canonical_model(model)
+        caps = self._capability_set(capabilities)
+        context = int(context_tokens or 0)
+        free_transport = (
+            cp in {"opencode-free", "opencode-zen"}
+            or cm.endswith(":free")
+            or cm.endswith("-free")
+            or cost_per_1k == 0
+        )
+        local_transport = cp in {"lmstudio", "ollama", "llama", "local", "localai"}
+        resolved_cost = 0.0 if local_transport or free_transport else float(
+            cost_per_1k if cost_per_1k is not None else 1.0
+        )
+        classes: set[ModelClass] = set()
+        if local_transport:
+            classes.add(ModelClass.LOCAL_FAST)
+        elif free_transport:
+            classes.add(
+                ModelClass.FREE_REASONING
+                if Capability.REASONING in caps
+                else ModelClass.FREE_FAST
+            )
+        else:
+            classes.add(
+                ModelClass.PAID_REASONING
+                if Capability.REASONING in caps
+                else ModelClass.PAID_FAST
+            )
+        if context >= _LONG_CONTEXT_TOKENS:
+            classes.add(ModelClass.LONG_CONTEXT)
+        if Capability.CODING in caps or cp in {
+            "openai-codex", "opencode-go", "opencode-free", "opencode-zen"
+        }:
+            classes.add(ModelClass.CODING)
+        if Capability.VISION in caps:
+            classes.add(ModelClass.VISION)
+        return Route(
+            provider=cp,
+            model=cm,
+            cost_per_1k=resolved_cost,
+            capabilities=caps,
+            context_window=ContextWindow(max_tokens=context or ContextWindow().max_tokens),
+            model_classes=frozenset(classes),
+        )
+
+    def build_catalog_route(self, provider: str, model: str) -> Route:
+        """Use Hermes' existing cached metadata; never perform network I/O here."""
+        capabilities: dict[str, Any] = {}
+        context_tokens = 0
+        cost_per_1k: float | None = None
+        try:
+            from agent.models_dev import get_model_info
+
+            info = get_model_info(provider, model, allow_network=False)
+            if info is not None:
+                capabilities = {
+                    "reasoning": bool(info.reasoning),
+                    "vision": bool(info.attachment),
+                    "tools": bool(info.tool_call),
+                }
+                context_tokens = int(info.context_window or 0)
+                costs = [v for v in (info.cost_input, info.cost_output) if isinstance(v, (int, float))]
+                if costs:
+                    # models.dev prices are per million tokens.
+                    cost_per_1k = sum(costs) / len(costs) / 1000.0
+        except Exception:
+            logger.debug("Model metadata lookup failed for %s/%s", provider, model, exc_info=True)
+        return self.build_route(
+            provider,
+            model,
+            cost_per_1k=cost_per_1k,
+            capabilities=capabilities,
+            context_tokens=context_tokens,
+        )
+
+    @staticmethod
+    def _route_key(provider: str, model: str) -> str:
+        return f"{_canonical_provider(provider)}:{_canonical_model(model)}"
+
+    @staticmethod
+    def provider_label_for_agent(agent: Any) -> str:
+        provider = _canonical_provider(str(getattr(agent, "provider", "") or ""))
+        requested = _canonical_provider(str(getattr(agent, "requested_provider", "") or ""))
+        if provider == "custom" and requested:
+            return requested.removeprefix("custom:")
+        return provider
+
+    def record_decision(
+        self,
+        *,
+        session_id: str,
+        provider: str,
+        model: str,
+        source: RouteSource | str,
+        reason: str,
+    ) -> None:
+        source_value = source.value if isinstance(source, RouteSource) else str(source)
+        with self._db() as conn:
+            conn.execute(
+                "INSERT INTO routing_decisions "
+                "(session_id, provider, model, source, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    str(session_id or ""), _canonical_provider(provider), _canonical_model(model),
+                    source_value, str(reason)[:500], _now_ts(),
+                ),
+            )
+            conn.execute(
+                "DELETE FROM routing_decisions WHERE id NOT IN "
+                "(SELECT id FROM routing_decisions ORDER BY id DESC LIMIT ?)",
+                (_DECISION_HISTORY_LIMIT,),
+            )
+
+    def record_health(
+        self,
+        provider: str,
+        model: str,
+        status: HealthStatus | str,
+        *,
+        latency_ms: float | None = None,
+        auth_type: str = "",
+        error_type: str = "",
+    ) -> None:
+        status_value = status.value if isinstance(status, HealthStatus) else str(status)
+        with self._db() as conn:
+            conn.execute(
+                "INSERT INTO provider_health "
+                "(provider, model, status, latency_ms, auth_type, error_type, checked_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(provider, model) DO UPDATE SET "
+                "status=excluded.status, latency_ms=excluded.latency_ms, "
+                "auth_type=excluded.auth_type, error_type=excluded.error_type, "
+                "checked_at=excluded.checked_at",
+                (
+                    _canonical_provider(provider), _canonical_model(model), status_value,
+                    round(float(latency_ms), 1) if latency_ms is not None else None,
+                    str(auth_type)[:80], str(error_type)[:160], _now_ts(),
+                ),
+            )
+
+    def get_health_status(self, provider: str, model: str) -> str | None:
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT status FROM provider_health WHERE provider=? AND model=?",
+                (_canonical_provider(provider), _canonical_model(model)),
+            ).fetchone()
+            return str(row["status"]) if row else None
+
+    def is_route_available(self, provider: str, model: str) -> bool:
+        if self.is_in_cooldown(provider, model):
+            return False
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT status, checked_at FROM provider_health WHERE provider=? AND model=?",
+                (_canonical_provider(provider), _canonical_model(model)),
+            ).fetchone()
+        if row is None:
+            return True
+        unavailable = str(row["status"]) in {
+            HealthStatus.AUTH_FAILED.value,
+            HealthStatus.RATE_LIMITED.value,
+            HealthStatus.OFFLINE.value,
+            HealthStatus.UNCONFIGURED.value,
+        }
+        return not unavailable or (_now_ts() - float(row["checked_at"])) >= _HEALTH_REPROBE_SECONDS
+
+    @staticmethod
+    def auth_type_for_agent(agent: Any) -> str:
+        provider = _canonical_provider(str(getattr(agent, "provider", "") or ""))
+        if provider in {"openai-codex", "nous", "qwen-oauth", "minimax-oauth", "xai-oauth"}:
+            return "oauth"
+        if provider in {"lmstudio", "ollama", "local", "localai"}:
+            return "local"
+        if getattr(agent, "_credential_pool", None) is not None:
+            return "credential_pool"
+        return "api_key_or_custom"
+
+    def record_startup_auth_failure(
+        self, provider: str, model: str, *, session_id: str = "", error_type: str = "AuthError"
+    ) -> None:
+        """Record a primary auth failure that occurs before AIAgent exists."""
+        provider = provider or "unknown"
+        model = model or "unknown"
+        self.record_health(
+            provider, model, HealthStatus.AUTH_FAILED,
+            auth_type="credential_resolution", error_type=error_type,
+        )
+        self.record_decision(
+            session_id=session_id, provider=provider, model=model,
+            source=RouteSource.FALLBACK,
+            reason="primary authentication failed before agent initialization",
+        )
+
+    def register_agent(
+        self,
+        agent: Any,
+        *,
+        configured_provider: str = "",
+        configured_model: str = "",
+    ) -> Decision:
+        provider = self.provider_label_for_agent(agent)
+        model = str(getattr(agent, "model", "") or "")
+        pin = self.get_pin()
+        current_key = (_canonical_provider(provider), _canonical_model(model))
+        if pin == current_key:
+            source = RouteSource.PIN
+            reason = "persistent pin"
+        elif is_omniroute_auto(
+            provider, model, str(getattr(agent, "requested_provider", "") or "")
+        ):
+            source = RouteSource.OMNIROUTE_AUTO
+            reason = "explicit OmniRoute Auto bypass; no second routing layer"
+        elif configured_provider and configured_model and current_key != (
+            _canonical_provider(configured_provider), _canonical_model(configured_model)
+        ):
+            source = RouteSource.MANUAL
+            reason = "runtime route differs from configured default"
+        else:
+            source = RouteSource.AUTOMATIC
+            reason = "configured direct route"
+        route = self.build_catalog_route(provider, model)
+        decision = Decision(route=route, task_class=infer_task_class(agent), reason=reason, source=source)
+        setattr(agent, "_global_route_source", source.value)
+        setattr(agent, "_global_primary_route_source", source.value)
+        setattr(agent, "_global_router_bypass", source is RouteSource.OMNIROUTE_AUTO)
+        setattr(agent, "_global_router_failed_routes", set())
+        self.set_route_state(provider, model, "active")
+        self.record_decision(
+            session_id=str(getattr(agent, "session_id", "") or ""),
+            provider=provider, model=model, source=source, reason=reason,
+        )
+        return decision
+
+    def record_active_route(
+        self,
+        agent: Any,
+        *,
+        source: RouteSource | str,
+        reason: str,
+        set_primary: bool = True,
+    ) -> None:
+        source_value = source.value if isinstance(source, RouteSource) else str(source)
+        setattr(agent, "_global_route_source", source_value)
+        if set_primary:
+            setattr(agent, "_global_primary_route_source", source_value)
+        provider = self.provider_label_for_agent(agent)
+        setattr(
+            agent, "_global_router_bypass",
+            is_omniroute_auto(provider, agent.model, str(getattr(agent, "requested_provider", "") or "")),
+        )
+        self.set_route_state(provider, str(agent.model), "active")
+        self.record_decision(
+            session_id=str(getattr(agent, "session_id", "") or ""),
+            provider=provider, model=str(agent.model),
+            source=source_value, reason=reason,
+        )
+
+    def begin_turn(self, agent: Any, *, primary_restored: bool = False) -> None:
+        """Reset turn-local exclusions and publish rollback provenance."""
+        setattr(agent, "_global_router_failed_routes", set())
+        if primary_restored:
+            source = str(getattr(agent, "_global_primary_route_source", "automatic") or "automatic")
+            self.record_active_route(
+                agent, source=source, reason="primary route restored after fallback",
+                set_primary=False,
+            )
+
+    def plan_failover(
+        self,
+        entries: list[dict[str, Any]],
+        *,
+        failed_routes: set[str] | None = None,
+        bypass: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return a finite, de-duplicated candidate plan.
+
+        Explicit OmniRoute Auto owns its own inner routing and therefore keeps
+        Hermes' configured fallback chain untouched.
+        """
+        if bypass:
+            return entries
+        failed = set(failed_routes or ())
+        seen: set[str] = set()
+        planned: list[tuple[int, int, dict[str, Any]]] = []
+        tier = {
+            ModelClass.LOCAL_FAST: 0,
+            ModelClass.FREE_FAST: 1,
+            ModelClass.FREE_REASONING: 2,
+            ModelClass.PAID_FAST: 3,
+            ModelClass.PAID_REASONING: 4,
+        }
+        for index, entry in enumerate(entries):
+            provider = str(entry.get("provider") or "")
+            model = str(entry.get("model") or "")
+            if not provider or not model:
+                continue
+            key = self._route_key(provider, model)
+            if key in seen or key in failed or not self.is_route_available(provider, model):
+                continue
+            seen.add(key)
+            route = self.build_catalog_route(provider, model)
+            base_class = next((c for c in tier if c in route.model_classes), ModelClass.PAID_FAST)
+            planned.append((tier[base_class], index, dict(entry)))
+        planned.sort(key=lambda item: (item[0], item[1]))
+        return [entry for _, _, entry in planned]
+
+    def enforce_pre_turn(self, agent: Any) -> bool:
+        """Apply a persistent pin through Hermes' existing switch_model owner."""
+        pin = self.get_pin()
+        if pin is None:
+            return False
+        current = (
+            _canonical_provider(str(getattr(agent, "provider", "") or "")),
+            _canonical_model(str(getattr(agent, "model", "") or "")),
+        )
+        if current == pin:
+            self.record_active_route(agent, source=RouteSource.PIN, reason="persistent pin")
+            return False
+        from hermes_cli.model_switch import switch_model as resolve_model_switch
+
+        result = resolve_model_switch(
+            raw_input=pin[1], explicit_provider=pin[0],
+            current_provider=current[0], current_model=current[1],
+            current_base_url=str(getattr(agent, "base_url", "") or ""),
+            current_api_key=str(getattr(agent, "api_key", "") or ""),
+            is_global=False,
+        )
+        if not result.success:
+            self.record_health(pin[0], pin[1], HealthStatus.UNCONFIGURED, error_type=result.error_message)
+            raise RuntimeError(
+                f"Pinned route {pin[0]}/{pin[1]} could not be activated: {result.error_message}"
+            )
+        agent.switch_model(
+            new_model=result.new_model,
+            new_provider=result.target_provider,
+            api_key=result.api_key,
+            base_url=result.base_url,
+            api_mode=result.api_mode,
+            capabilities=getattr(result, "runtime_capabilities", None),
+            routing_source=RouteSource.PIN.value,
+        )
+        if getattr(agent, "_global_route_source", None) != RouteSource.PIN.value:
+            self.record_active_route(agent, source=RouteSource.PIN, reason="persistent pin applied")
+        return True
 
     # ------------------------------------------------------------------
     # Ranking
@@ -364,24 +805,37 @@ class GlobalModelRouter:
         if pin is not None:
             for r in eligible:
                 if (r.provider, r.model) == pin:
-                    return Decision(route=r, task_class=task_class, reason="pinned")
+                    if not self.is_route_available(r.provider, r.model):
+                        return Decision(
+                            route=None, task_class=task_class,
+                            reason="pinned route is unavailable", source=RouteSource.PIN,
+                        )
+                    return Decision(
+                        route=r, task_class=task_class, reason="pinned", source=RouteSource.PIN
+                    )
             if any((self._canonicalize_route(r).provider, self._canonicalize_route(r).model) == pin for r in routes):
-                return Decision(route=None, task_class=task_class, reason="pinned route cannot satisfy constraints")
+                return Decision(
+                    route=None, task_class=task_class,
+                    reason="pinned route cannot satisfy constraints", source=RouteSource.PIN,
+                )
 
         # Manual preference is temporary and is skipped only for this decision
         # when it is cooling down or not eligible; the stored preference stays.
         manual = self.get_manual_preference()
         if manual is not None and manual in eligible_keys:
             candidate = next(r for r in eligible if (r.provider, r.model) == manual)
-            if not self.is_in_cooldown(candidate.provider, candidate.model):
-                return Decision(route=candidate, task_class=task_class, reason="manual preference")
+            if self.is_route_available(candidate.provider, candidate.model):
+                return Decision(
+                    route=candidate, task_class=task_class,
+                    reason="manual preference", source=RouteSource.MANUAL,
+                )
 
         for r in eligible:
-            if not self.is_in_cooldown(r.provider, r.model):
+            if self.is_route_available(r.provider, r.model):
                 return Decision(route=r, task_class=task_class, reason="cheapest available")
 
         if eligible:
-            return Decision(route=eligible[0], task_class=task_class, reason="best-effort (all in cooldown)")
+            return Decision(route=None, task_class=task_class, reason="all qualifying routes unavailable")
         return Decision(route=None, task_class=task_class, reason="no qualifying routes")
 
     # ------------------------------------------------------------------
@@ -821,6 +1275,9 @@ class GlobalModelRouter:
             "pins": {},
             "manual_preferences": {},
             "route_states": {},
+            "health": {},
+            "models": {},
+            "decisions": [],
             "leases": [],
         }
 
@@ -849,6 +1306,26 @@ class GlobalModelRouter:
                 key = f"{row['provider']}:{row['model']}"
                 snap["route_states"][key] = row["state"]
 
+            for row in conn.execute(
+                "SELECT provider, model, status, latency_ms, auth_type, error_type, checked_at "
+                "FROM provider_health ORDER BY provider, model"
+            ):
+                key = f"{row['provider']}:{row['model']}"
+                snap["health"][key] = {
+                    "status": row["status"],
+                    "latency_ms": row["latency_ms"],
+                    "auth_type": row["auth_type"],
+                    "error_type": row["error_type"],
+                    "checked_at": round(row["checked_at"], 3),
+                }
+
+            for row in conn.execute(
+                "SELECT session_id, provider, model, source, reason, created_at "
+                "FROM routing_decisions ORDER BY id DESC LIMIT ?",
+                (_DECISION_HISTORY_LIMIT,),
+            ):
+                snap["decisions"].append(dict(row))
+
             # Active leases
             now = _now_ts()
             for row in conn.execute(
@@ -863,6 +1340,20 @@ class GlobalModelRouter:
                     "expires_at": round(row["expires_at"], 1),
                 })
 
+        for key in sorted(set(snap["route_states"]) | set(snap["health"])):
+            provider, model = key.split(":", 1)
+            route = self.build_catalog_route(provider, model)
+            classes = set(route.model_classes)
+            health = snap["health"].get(key, {})
+            if health.get("status") not in (None, HealthStatus.ONLINE.value):
+                classes.add(ModelClass.UNAVAILABLE)
+            snap["models"][key] = {
+                "classes": sorted(item.value for item in classes),
+                "capabilities": sorted(item.value for item in route.capabilities),
+                "context_window": route.context_window.max_tokens,
+                "cost_per_1k": route.cost_per_1k,
+                "health_status": health.get("status", "UNKNOWN"),
+            }
         return snap
 
 

@@ -25,12 +25,16 @@ from agent.global_model_router import (
     ContextWindow,
     Decision,
     GlobalModelRouter,
+    HealthStatus,
+    ModelClass,
     ProviderEntry,
     Route,
+    RouteSource,
     TaskClass,
     _canonical_model,
     _canonical_provider,
     _now_ts,
+    is_omniroute_auto,
 )
 
 
@@ -628,6 +632,7 @@ class TestRouteIntegration:
         d = router.route(routes, TaskClass.NORMAL)
         assert d.route.provider == "deepseek"
         assert d.route.model == "deepseek-chat"
+        assert d.source is RouteSource.PIN
 
     def test_route_respects_manual_preference(self, tmp_path):
         router = GlobalModelRouter(store_path=tmp_path / "test.db")
@@ -636,6 +641,7 @@ class TestRouteIntegration:
         d = router.route(routes, TaskClass.NORMAL)
         assert d.route.provider == "anthropic"
         assert d.route.model == "claude-haiku"
+        assert d.source is RouteSource.MANUAL
 
     def test_pin_takes_precedence_over_manual(self, tmp_path):
         router = GlobalModelRouter(store_path=tmp_path / "test.db")
@@ -687,8 +693,8 @@ class TestEdgeCases:
         for r in routes:
             router.set_cooldown(r.provider, r.model, 300)
         d = router.route(routes, TaskClass.NORMAL)
-        # Should still return something (best-effort) or None
-        assert d is not None
+        assert d.route is None
+        assert d.reason == "all qualifying routes unavailable"
 
     def test_now_ts_returns_float(self):
         ts = _now_ts()
@@ -718,3 +724,159 @@ class TestHermesHome:
         router = GlobalModelRouter()
         expected_dir = tmp_path / ".hermes" if os.name != "nt" else tmp_path / "AppData" / "Local" / "hermes"
         assert router.store_path.parent == expected_dir or router.store_path.name == "global_model_router.db"
+
+
+class TestRuntimeRoutingContracts:
+    def test_classifies_verified_free_reasoning_long_context_model(self, tmp_path):
+        router = GlobalModelRouter(store_path=tmp_path / "test.db")
+        route = router.build_route(
+            "openrouter", "verified-free", cost_per_1k=0.0,
+            capabilities={"reasoning": True, "tools": True, "coding": True},
+            context_tokens=262_144,
+        )
+        assert ModelClass.FREE_REASONING in route.model_classes
+        assert ModelClass.LONG_CONTEXT in route.model_classes
+        assert ModelClass.CODING in route.model_classes
+
+    def test_classifies_local_model_without_claiming_unverified_capabilities(self, tmp_path):
+        router = GlobalModelRouter(store_path=tmp_path / "test.db")
+        route = router.build_route("lmstudio", "local-model", cost_per_1k=0.0)
+        assert route.model_classes == frozenset({ModelClass.LOCAL_FAST})
+        assert route.capabilities == frozenset()
+
+    @pytest.mark.parametrize("model", ["auto/best-chat", "auto/*", "AUTO/coding"])
+    def test_omniroute_auto_is_explicit_bypass(self, model):
+        assert is_omniroute_auto("omniroute", model)
+        assert not is_omniroute_auto("openrouter", model)
+
+    def test_register_agent_records_omniroute_auto_source(self, tmp_path):
+        router = GlobalModelRouter(store_path=tmp_path / "test.db")
+        agent = type("Agent", (), {
+            "provider": "custom", "requested_provider": "omniroute",
+            "model": "auto/best-chat", "session_id": "s1",
+            "runtime_capabilities": {}, "context_compressor": None,
+        })()
+        decision = router.register_agent(
+            agent, configured_provider="omniroute", configured_model="auto/best-chat"
+        )
+        assert decision.source is RouteSource.OMNIROUTE_AUTO
+        assert agent._global_router_bypass is True
+
+    def test_register_agent_marks_non_default_route_manual(self, tmp_path):
+        router = GlobalModelRouter(store_path=tmp_path / "test.db")
+        agent = type("Agent", (), {
+            "provider": "openai-codex", "model": "gpt-5.6-sol", "session_id": "s1",
+            "runtime_capabilities": {"reasoning": True}, "context_compressor": None,
+        })()
+        decision = router.register_agent(
+            agent, configured_provider="omniroute", configured_model="auto/best-chat"
+        )
+        assert decision.source is RouteSource.MANUAL
+        assert agent._global_route_source == "manual"
+
+    def test_health_status_is_persistent_and_json_safe(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        router = GlobalModelRouter(store_path=db_path)
+        router.record_health(
+            "openrouter", "model-a", HealthStatus.ONLINE,
+            latency_ms=123.4, auth_type="api_key",
+        )
+        snap = GlobalModelRouter(store_path=db_path).status_snapshot()
+        health = snap["health"]["openrouter:model-a"]
+        assert health["status"] == "ONLINE"
+        assert health["latency_ms"] == 123.4
+        assert health["auth_type"] == "api_key"
+
+    def test_failover_plan_skips_cooldown_and_deduplicates(self, tmp_path):
+        router = GlobalModelRouter(store_path=tmp_path / "test.db")
+        router.set_cooldown("openrouter", "free-a", 300)
+        entries = [
+            {"provider": "openrouter", "model": "free-a"},
+            {"provider": "openrouter", "model": "free-a"},
+            {"provider": "opencode-free", "model": "free-b"},
+        ]
+        planned = router.plan_failover(entries, failed_routes={"direct:failed"})
+        assert [(e["provider"], e["model"]) for e in planned] == [
+            ("opencode-free", "free-b")
+        ]
+
+    def test_pin_does_not_select_offline_route(self, tmp_path):
+        router = GlobalModelRouter(store_path=tmp_path / "test.db")
+        router.set_pin("openai", "gpt-4o")
+        router.record_health("openai", "gpt-4o", HealthStatus.OFFLINE)
+        d = router.route(_make_routes(), TaskClass.NORMAL)
+        assert d.route is None
+        assert d.source is RouteSource.PIN
+        assert d.reason == "pinned route is unavailable"
+
+    def test_failed_health_becomes_probe_eligible_after_bounded_window(self, tmp_path, monkeypatch):
+        clock = [1000.0]
+        monkeypatch.setattr("agent.global_model_router._now_ts", lambda: clock[0])
+        router = GlobalModelRouter(store_path=tmp_path / "test.db")
+        router.record_health("openai", "gpt-4o", HealthStatus.OFFLINE)
+        assert router.is_route_available("openai", "gpt-4o") is False
+        clock[0] += 301
+        assert router.is_route_available("openai", "gpt-4o") is True
+
+    def test_failover_plan_is_noop_for_omniroute_auto(self, tmp_path):
+        router = GlobalModelRouter(store_path=tmp_path / "test.db")
+        entries = [
+            {"provider": "openrouter", "model": "a"},
+            {"provider": "opencode-free", "model": "b"},
+        ]
+        assert router.plan_failover(entries, bypass=True) == entries
+
+    def test_pin_is_applied_through_existing_switch_owner(self, tmp_path, monkeypatch):
+        router = GlobalModelRouter(store_path=tmp_path / "test.db")
+        router.set_pin("openrouter", "pinned-model")
+        calls = []
+        agent = type("Agent", (), {
+            "provider": "openai-codex", "model": "old", "base_url": "", "api_key": "",
+            "session_id": "s1", "runtime_capabilities": {}, "context_compressor": None,
+            "switch_model": lambda self, **kw: calls.append(kw),
+        })()
+        result = type("Result", (), {
+            "success": True, "new_model": "pinned-model", "target_provider": "openrouter",
+            "api_key": "", "base_url": "https://openrouter.ai/api/v1",
+            "api_mode": "chat_completions", "runtime_capabilities": {},
+        })()
+        monkeypatch.setattr("hermes_cli.model_switch.switch_model", lambda **_kw: result)
+        assert router.enforce_pre_turn(agent) is True
+        assert calls[0]["routing_source"] == "pin"
+
+    def test_unresolvable_pin_fails_closed(self, tmp_path, monkeypatch):
+        router = GlobalModelRouter(store_path=tmp_path / "test.db")
+        router.set_pin("missing", "pinned-model")
+        agent = type("Agent", (), {
+            "provider": "openai-codex", "model": "old", "base_url": "", "api_key": "",
+            "session_id": "s1", "runtime_capabilities": {}, "context_compressor": None,
+        })()
+        result = type("Result", (), {
+            "success": False, "error_message": "provider unavailable",
+        })()
+        monkeypatch.setattr("hermes_cli.model_switch.switch_model", lambda **_kw: result)
+        with pytest.raises(RuntimeError, match="Pinned route"):
+            router.enforce_pre_turn(agent)
+        assert router.status_snapshot()["health"]["missing:pinned-model"]["status"] == "UNCONFIGURED"
+
+    def test_decision_history_is_bounded(self, tmp_path):
+        router = GlobalModelRouter(store_path=tmp_path / "test.db")
+        for i in range(230):
+            router.record_decision(
+                session_id="s1", provider="p", model=f"m{i}",
+                source=RouteSource.AUTOMATIC, reason="test",
+            )
+        snap = router.status_snapshot()
+        assert len(snap["decisions"]) <= 200
+
+    def test_begin_turn_resets_failed_routes_and_restores_source(self, tmp_path):
+        router = GlobalModelRouter(store_path=tmp_path / "test.db")
+        agent = type("Agent", (), {
+            "provider": "openai-codex", "model": "primary", "session_id": "s1",
+            "_global_router_failed_routes": {"old:failed"},
+            "_global_primary_route_source": "manual",
+        })()
+        router.begin_turn(agent, primary_restored=True)
+        assert agent._global_router_failed_routes == set()
+        assert agent._global_route_source == "manual"
+        assert router.status_snapshot()["decisions"][0]["reason"] == "primary route restored after fallback"

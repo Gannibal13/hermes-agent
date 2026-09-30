@@ -891,7 +891,21 @@ def build_turn_context(
     set_current_write_origin(getattr(agent, "_memory_write_origin", "assistant_tool"))
     from tools.skill_provenance import set_review_attended
     set_review_attended(getattr(agent, "_review_attended", False))
-    agent._restore_primary_runtime()
+    _primary_restored = bool(agent._restore_primary_runtime())
+    _router = getattr(agent, "_global_model_router", None)
+    try:
+        from agent.global_model_router import GlobalModelRouter
+        if not isinstance(_router, GlobalModelRouter):
+            _router = None
+    except Exception:
+        _router = None
+    if _router is not None:
+        try:
+            _router.begin_turn(agent, primary_restored=_primary_restored)
+            _router.enforce_pre_turn(agent)
+        except Exception:
+            logger.warning("Global Model Router pre-turn enforcement failed", exc_info=True)
+            raise
     _publish_runtime_main(agent)
     _refresh_mcp_tools_between_turns(agent)
 

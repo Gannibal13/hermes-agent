@@ -310,6 +310,12 @@ class CLIAgentSetupMixin:
                 logger.warning(
                     "Primary provider auth failed (%s). Falling through to fallback: %s/%s",
                     primary_exc, _fb_provider, _fb_model)
+                self._global_router_startup_failure = {
+                    "provider": str(getattr(self, "requested_provider", "") or "unknown"),
+                    "model": str(getattr(self, "model", "") or "unknown"),
+                    "session_id": str(getattr(self, "session_id", "") or ""),
+                    "error_type": type(primary_exc).__name__,
+                }
                 _cprint(f"⚠️  Primary auth failed — switching to fallback: {_fb_provider} / {_fb_model}")
                 self.requested_provider = _fb_provider
                 self.model = _fb_model
@@ -567,6 +573,18 @@ class CLIAgentSetupMixin:
                 tool_gen_callback=self._on_tool_gen_start if self.streaming_enabled else None,
                 notice_callback=self._on_notice, notice_clear_callback=self._on_notice_clear,
                 reaction_callback=self._on_reaction)
+            _startup_failure = getattr(self, "_global_router_startup_failure", None)
+            _router = getattr(self.agent, "_global_model_router", None)
+            if isinstance(_startup_failure, dict) and _router is not None:
+                try:
+                    _router.record_startup_auth_failure(**_startup_failure)
+                    _router.record_active_route(
+                        self.agent, source="fallback", reason="startup authentication fallback",
+                        set_primary=False,
+                    )
+                    self._global_router_startup_failure = None
+                except Exception:
+                    logger.warning("Global Model Router startup-auth bookkeeping failed", exc_info=True)
             # Reference for atexit memory-provider shutdown: ``_run_cleanup`` in cli.py
             # reads ``cli._active_agent_ref``, so this MUST write the ``cli`` module's
             # global — a ``global`` statement here would bind this module's namespace.

@@ -1831,6 +1831,29 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     construction goes through resolve_provider_client (no duplicated provider→key mappings)."""
     from agent.fallback_cooldown import _arm_rate_limit_cooldown
     cooldown_seconds = _arm_rate_limit_cooldown(agent, reason)
+    router = getattr(agent, "_global_model_router", None)
+    try:
+        from agent.global_model_router import GlobalModelRouter
+        if not isinstance(router, GlobalModelRouter):
+            router = None
+    except Exception:
+        router = None
+    if router is not None:
+        try:
+            failed = getattr(agent, "_global_router_failed_routes", None)
+            if failed is None:
+                failed = agent._global_router_failed_routes = set()
+            if reason is not None and getattr(agent, "provider", None) and getattr(agent, "model", None):
+                failed.add(router._route_key(str(agent.provider), str(agent.model)))
+            prefix = list(agent._fallback_chain[:agent._fallback_index])
+            remaining = list(agent._fallback_chain[agent._fallback_index:])
+            agent._fallback_chain = prefix + router.plan_failover(
+                remaining,
+                failed_routes=failed,
+                bypass=bool(getattr(agent, "_global_router_bypass", False)),
+            )
+        except Exception:
+            logger.warning("Global Model Router failover planning failed", exc_info=True)
     while True:
         if agent._fallback_index >= len(agent._fallback_chain):
             return _fallback_chain_exhausted(agent, reason)
@@ -1925,6 +1948,14 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             from agent.native_compaction import resolve_native_compaction_capabilities
             agent.runtime_capabilities = resolve_native_compaction_capabilities(
                 model=agent.model, base_url=agent.base_url, provider=fb_provider, is_codex_backend=fb_provider == "openai-codex")
+            if router is not None:
+                try:
+                    router.record_active_route(
+                        agent, source="fallback", reason=_fallback_reason_text(reason),
+                        set_primary=False,
+                    )
+                except Exception:
+                    logger.warning("Global Model Router fallback bookkeeping failed", exc_info=True)
             return True
         except Exception as e:
             if fb_provider == "nous":
